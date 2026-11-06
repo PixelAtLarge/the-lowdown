@@ -1,0 +1,380 @@
+#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { extname } from 'node:path';
+import { createInterface, type Interface } from 'node:readline';
+import { parseArgs } from 'node:util';
+import { buildBrief, isBrief } from './brief.js';
+import { lintBrief } from './lint.js';
+import { DEFAULT_QUESTIONS } from './questions.js';
+import { renderBrief, type RenderOptions } from './render.js';
+import { questionsToJSON } from './serialize.js';
+import { BriefSession } from './session.js';
+import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question } from './types.js';
+
+// ── Terminal helpers ─────────────────────────────────────────
+
+const err = process.stderr;
+const useColor = Boolean(err.isTTY) && !process.env.NO_COLOR;
+const paint = (code: string) => (s: string) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
+const bold = paint('1');
+const dim = paint('2');
+const cyan = paint('36');
+const green = paint('32');
+const yellow = paint('33');
+const red = paint('31');
+const say = (s = '') => err.write(s + '\n');
+
+class LineReader {
+  private readonly rl: Interface;
+  private readonly queue: string[] = [];
+  private readonly waiters: Array<(line: string | null) => void> = [];
+  private closed = false;
+  readonly terminal: boolean;
+
+  constructor() {
+    this.terminal = Boolean(process.stdin.isTTY && err.isTTY);
+    this.rl = createInterface({ input: process.stdin, output: err, terminal: this.terminal });
+    this.rl.on('line', (line) => {
+      const w = this.waiters.shift();
+      if (w) w(line);
+      else this.queue.push(line);
+    });
+    this.rl.on('close', () => {
+      this.closed = true;
+      for (const w of this.waiters.splice(0)) w(null);
+    });
+    this.rl.on('SIGINT', () => {
+      say('\n' + dim('Cancelled. Nothing was written.'));
+      process.exit(130);
+    });
+  }
+
+  /** Resolves with the next line, or null when input has ended. */
+  ask(prompt: string): Promise<string | null> {
+    if (this.terminal) {
+      this.rl.setPrompt(prompt);
+      this.rl.prompt();
+    } else {
+      err.write(prompt);
+    }
+    const queued = this.queue.shift();
+    if (queued !== undefined) {
+      if (!this.terminal) err.write(queued + '\n');
+      return Promise.resolve(queued);
+    }
+    if (this.closed) return Promise.resolve(null);
+    return new Promise((resolve) =>
+      this.waiters.push((line) => {
+        if (!this.terminal && line !== null) err.write(line + '\n');
+        resolve(line);
+      }),
+    );
+  }
+
+  close() {
+    this.rl.close();
+  }
+}
+
+// ── Arg parsing ──────────────────────────────────────────────
+
+const HELP = `${bold('the-lowdown')} — give your AI agent the lowdown. A short guided Q&A that writes a design brief it can follow.
+
+${bold('Usage')}
+  the-lowdown [init] [options]     Run the guided Q&A (default)
+  the-lowdown render <file>        Render an answers or brief JSON file
+  the-lowdown lint <file>          Check a brief for weak spots
+  the-lowdown questions            Print the question schema as JSON (for agents)
+
+${bold('Options')}
+  -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
+  -f, --format <fmt>        markdown | prompt | json  (default: from --out extension, else markdown)
+  -q, --quick               Essential questions only
+      --answers <file>      Prefill answers from JSON; only missing questions are asked
+      --save-answers <file> Also save your raw answers as JSON (re-render or edit later)
+      --no-instructions     Leave out the "How to use this brief" section
+      --no-checklist        Leave out the definition-of-done checklist
+  -y, --yes                 Don't ask before writing or overwriting
+  -h, --help                Show this help
+  -v, --version             Show version
+
+${bold('While answering')}
+  Enter   skip an optional question (or accept the default)
+  <       go back one question
+  ?       show why the question matters
+`;
+
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return String(pkg.version);
+  } catch {
+    return 'unknown';
+  }
+}
+
+function formatFor(out: string | undefined, explicit: string | undefined): OutputFormat {
+  const f = explicit?.toLowerCase();
+  if (f === 'md' || f === 'markdown') return 'markdown';
+  if (f === 'json') return 'json';
+  if (f === 'prompt' || f === 'xml') return 'prompt';
+  if (f) throw new Error(`Unknown format "${explicit}". Use markdown, prompt or json.`);
+  const ext = out && out !== '-' ? extname(out).toLowerCase() : '';
+  if (ext === '.json') return 'json';
+  if (ext === '.xml' || ext === '.txt' || ext === '.prompt') return 'prompt';
+  return 'markdown';
+}
+
+function readJSON(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (e) {
+    throw new Error(`Could not read ${path}: ${(e as Error).message}`);
+  }
+}
+
+function loadBrief(path: string): Brief {
+  const data = readJSON(path);
+  if (isBrief(data)) return data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return buildBrief(data as Answers);
+  }
+  throw new Error(`${path} is neither a brief nor an answers object.`);
+}
+
+function printIssues(issues: LintIssue[]) {
+  if (!issues.length) {
+    say(green('✓ No issues. This brief gives an agent plenty to work with.'));
+    return;
+  }
+  for (const i of issues) {
+    const tag = i.level === 'warn' ? yellow('warn') : cyan('tip ');
+    say(`  ${tag}  ${i.message} ${dim(`(${i.field})`)}`);
+  }
+}
+
+// ── Interactive interview ────────────────────────────────────
+
+function describeChoices(q: Question): string[] {
+  const lines = (q.choices ?? []).map((c, i) => {
+    const n = dim(String(i + 1).padStart(2) + '.');
+    return `  ${n} ${c.label}${c.hint ? dim(` — ${c.hint}`) : ''}`;
+  });
+  if (q.type === 'multiselect') {
+    const max = q.max ? `up to ${q.max}, ` : '';
+    lines.push(dim(`  Numbers separated by commas (${max}e.g. 1,3)${q.allowOther ? ', or type your own' : ''}`));
+  } else if (q.allowOther) {
+    lines.push(dim('  A number, or type your own'));
+  }
+  return lines;
+}
+
+const showValue = (v: AnswerValue) =>
+  typeof v === 'boolean' ? (v ? 'yes' : 'no') : Array.isArray(v) ? v.join(', ') : v;
+
+async function askList(reader: LineReader, first: string): Promise<string | null> {
+  const items = [first];
+  for (;;) {
+    const line = await reader.ask(dim('  + '));
+    if (line === null || line.trim() === '') break;
+    items.push(line);
+  }
+  return items.join('\n');
+}
+
+async function interview(session: BriefSession, reader: LineReader): Promise<boolean> {
+  let lastSection = '';
+  for (;;) {
+    const q = session.current();
+    if (!q) return true;
+
+    if (q.section !== lastSection) {
+      const s = session.sections.find((x) => x.id === q.section);
+      say();
+      say(cyan(bold(`── ${s?.title ?? q.section}`)) + (s?.intro ? dim(` · ${s.intro}`) : ''));
+      lastSection = q.section;
+    }
+
+    const { index, total } = session.progress();
+    const draft = session.draft(q.id);
+    say();
+    say(`${dim(`[${index}/${total}]`)} ${bold(q.prompt)}${q.required ? red(' *') : ''}`);
+    if (q.choices) describeChoices(q).forEach((l) => say(l));
+    if (q.type === 'list') say(dim('  One per line. Empty line when done.'));
+    if (q.example) say(dim(`  e.g. ${q.example}`));
+    if (draft !== undefined) say(dim(`  Enter to keep: ${showValue(draft)}`));
+    else if (q.default !== undefined) say(dim(`  Enter for: ${showValue(q.default)}`));
+
+    let raw = await reader.ask(cyan('› '));
+    if (raw === null) {
+      // Input ended (e.g. piped). Skip whatever is optional; fail on required.
+      while (session.current()) {
+        if (!session.skip().ok) return false;
+      }
+      return true;
+    }
+    const cmd = raw.trim();
+
+    if (cmd === '<') {
+      if (session.back() && lastSection) lastSection = '';
+      continue;
+    }
+    if (cmd === '?') {
+      say(dim(`  ${q.help ?? 'No extra help for this one.'}`));
+      continue;
+    }
+    if (cmd === '') {
+      const result = draft !== undefined ? session.answer(draft) : session.skip();
+      if (!result.ok) say(red(`  ${result.error}`));
+      continue;
+    }
+    if (q.type === 'list') {
+      raw = (await askList(reader, raw)) ?? raw;
+    }
+    const result = session.answerText(raw);
+    if (!result.ok) say(red(`  ${result.error}`));
+  }
+}
+
+async function confirm(reader: LineReader, question: string, yes: boolean): Promise<boolean> {
+  if (yes) return true;
+  const a = await reader.ask(`${question} ${dim('(Y/n)')} `);
+  return a === null || !/^n/i.test(a.trim());
+}
+
+// ── Commands ─────────────────────────────────────────────────
+
+interface Flags {
+  out?: string;
+  format?: string;
+  quick?: boolean;
+  answers?: string;
+  'save-answers'?: string;
+  'no-instructions'?: boolean;
+  'no-checklist'?: boolean;
+  yes?: boolean;
+}
+
+function renderOpts(flags: Flags): RenderOptions {
+  return { instructions: !flags['no-instructions'], checklist: !flags['no-checklist'] };
+}
+
+function emit(content: string, out: string | undefined) {
+  if (!out || out === '-') process.stdout.write(content);
+  else writeFileSync(out, content);
+}
+
+async function runInit(flags: Flags) {
+  const out = flags.out ?? 'BRIEF.md';
+  const format = formatFor(out, flags.format);
+  const prefill = flags.answers ? (readJSON(flags.answers) as Answers) : undefined;
+  const session = new BriefSession({ questions: DEFAULT_QUESTIONS, quick: flags.quick, answers: prefill });
+  const reader = new LineReader();
+
+  try {
+    say(bold('the-lowdown') + dim(' · a few minutes now saves a lot of agent rework'));
+    say(dim('Enter skips optional questions · "<" goes back · "?" explains · Ctrl+C quits'));
+
+    const done = await interview(session, reader);
+    if (!done) {
+      const missing = session.missingRequired().map((q) => q.id).join(', ');
+      throw new Error(`Input ended before the required questions were answered (${missing}).`);
+    }
+
+    const brief = session.toBrief();
+    const issues = lintBrief(brief);
+    say();
+    say(bold('Review'));
+    printIssues(issues);
+    say();
+
+    const target = out === '-' ? 'stdout' : out;
+    if (!(await confirm(reader, `Write the brief to ${bold(target)}?`, Boolean(flags.yes)))) {
+      say(dim('Nothing written.'));
+      return;
+    }
+    if (out !== '-' && existsSync(out) && !(await confirm(reader, `${out} exists. Overwrite?`, Boolean(flags.yes)))) {
+      say(dim('Nothing written.'));
+      return;
+    }
+
+    emit(renderBrief(brief, format, renderOpts(flags)), out);
+    if (flags['save-answers']) {
+      writeFileSync(flags['save-answers'], JSON.stringify(session.answers, null, 2) + '\n');
+    }
+    if (out !== '-') {
+      say(green(`✓ Wrote ${out}`) + (flags['save-answers'] ? green(` and ${flags['save-answers']}`) : ''));
+      say(dim(`  Point your agent at it, e.g. add "Follow ${out} for all design decisions." to CLAUDE.md or AGENTS.md.`));
+    }
+  } finally {
+    reader.close();
+  }
+}
+
+function runRender(file: string | undefined, flags: Flags) {
+  if (!file) throw new Error('Usage: the-lowdown render <answers-or-brief.json> [-o file] [-f format]');
+  const brief = loadBrief(file);
+  emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags)), flags.out);
+  if (flags.out && flags.out !== '-') say(green(`✓ Wrote ${flags.out}`));
+}
+
+function runLint(file: string | undefined): number {
+  if (!file) throw new Error('Usage: the-lowdown lint <answers-or-brief.json>');
+  const issues = lintBrief(loadBrief(file));
+  printIssues(issues);
+  return issues.some((i) => i.level === 'warn') ? 1 : 0;
+}
+
+async function main(argv: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      out: { type: 'string', short: 'o' },
+      format: { type: 'string', short: 'f' },
+      quick: { type: 'boolean', short: 'q' },
+      answers: { type: 'string' },
+      'save-answers': { type: 'string' },
+      'no-instructions': { type: 'boolean' },
+      'no-checklist': { type: 'boolean' },
+      yes: { type: 'boolean', short: 'y' },
+      help: { type: 'boolean', short: 'h' },
+      version: { type: 'boolean', short: 'v' },
+    },
+  });
+
+  if (values.help) {
+    process.stdout.write(HELP);
+    return 0;
+  }
+  if (values.version) {
+    process.stdout.write(readVersion() + '\n');
+    return 0;
+  }
+
+  const [command = 'init', arg] = positionals;
+  const flags = values as Flags;
+  switch (command) {
+    case 'init':
+      await runInit(flags);
+      return 0;
+    case 'render':
+      runRender(arg, flags);
+      return 0;
+    case 'lint':
+      return runLint(arg);
+    case 'questions':
+      emit(JSON.stringify(questionsToJSON(), null, 2) + '\n', flags.out);
+      return 0;
+    default:
+      throw new Error(`Unknown command "${command}". Run the-lowdown --help.`);
+  }
+}
+
+main(process.argv.slice(2)).then(
+  (code) => process.exit(code),
+  (e: Error) => {
+    say(red(`Error: ${e.message}`));
+    process.exit(1);
+  },
+);

@@ -1,0 +1,59 @@
+{
+  "name": "the-lowdown",
+  "version": "0.1.0",
+  "description": "Give your AI agent the lowdown: a short guided Q&A that writes a design brief (users, goals, constraints, tone) for agents to follow.",
+  "keywords": [
+    "the-lowdown",
+    "design-brief",
+    "project-brief",
+    "ai-agents",
+    "agents-md",
+    "claude-code",
+    "prompt",
+    "ux",
+    "design",
+    "cli"
+  ],
+  "author": "Anna Poirier",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PixelAtLarge/the-lowdown.git"
+  },
+  "homepage": "https://github.com/PixelAtLarge/the-lowdown#readme",
+  "bugs": {
+    "url": "https://github.com/PixelAtLarge/the-lowdown/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "the-lowdown": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

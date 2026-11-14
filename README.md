@@ -2,7 +2,7 @@
 
 **Give your AI agent the lowdown.** A short guided Q&A that writes a design brief (users, goals, constraints, tone) your agent can follow.
 
-[![npm](https://img.shields.io/npm/v/the-lowdown)](https://www.npmjs.com/package/the-lowdown)
+[![npm](https://img.shields.io/npm/v/@pixelatlarge/the-lowdown)](https://www.npmjs.com/package/@pixelatlarge/the-lowdown)
 
 Agents fill gaps with generic defaults: everyone is the user, every feature is in scope, and the tone is "clean and modern". A few minutes of answering the right questions up front stops a lot of rework. `the-lowdown` asks those questions, pushes back on weak answers, and writes a brief in a shape agents follow well:
 
@@ -16,9 +16,14 @@ Zero runtime dependencies. Node 18.17+.
 
 ## Quick start
 
+Run it without installing, or install it globally to get the `the-lowdown` command:
+
 ```sh
-npx the-lowdown            # ~17 questions, writes BRIEF.md
-npx the-lowdown --quick    # ~11 essential questions
+npx @pixelatlarge/the-lowdown            # ~17 questions, writes BRIEF.md
+npx @pixelatlarge/the-lowdown --quick    # ~11 essential questions
+
+npm i -g @pixelatlarge/the-lowdown
+the-lowdown
 ```
 
 Then point your agent at it, for example in `CLAUDE.md` or `AGENTS.md`:
@@ -72,7 +77,7 @@ the-lowdown questions            Print the question schema as JSON (for agents)
 ## API
 
 ```ts
-import { createBrief, buildBrief, lintBrief, renderBrief } from 'the-lowdown';
+import { createBrief, buildBrief, lintBrief, renderBrief } from '@pixelatlarge/the-lowdown';
 
 // Answers in, brief out
 const md = createBrief({
@@ -97,7 +102,7 @@ const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json'
 `BriefSession` is a UI-agnostic state machine. Drive it from a React form, a chat agent, or a Slack bot.
 
 ```ts
-import { BriefSession } from 'the-lowdown';
+import { BriefSession } from '@pixelatlarge/the-lowdown';
 
 const session = new BriefSession({ quick: true });
 
@@ -118,7 +123,7 @@ const brief = session.toBrief();
 Add your own questions to any section, or a new one. Answers outside the built-in set land in `brief.extra` and render under their section.
 
 ```ts
-import { BriefSession, DEFAULT_QUESTIONS, type Question } from 'the-lowdown';
+import { BriefSession, DEFAULT_QUESTIONS, type Question } from '@pixelatlarge/the-lowdown';
 
 const questions: Question[] = [
   ...DEFAULT_QUESTIONS,

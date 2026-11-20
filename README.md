@@ -28,11 +28,13 @@ npm i -g @pixelatlarge/the-lowdown
 the-lowdown
 ```
 
-Then point your agent at it, for example in `CLAUDE.md` or `AGENTS.md`:
+Then point your agent at it:
 
-```md
-Follow BRIEF.md for all design decisions.
+```sh
+npx @pixelatlarge/the-lowdown link      # or add --link when you create the brief
 ```
+
+This adds a short "follow BRIEF.md" block to the agent instruction files you already have: `CLAUDE.md`, `AGENTS.md`, Cursor rules or Copilot instructions. If you have none, it creates `AGENTS.md`. Running it again updates the block instead of adding another, and nothing else in those files is touched. Pick files explicitly with `--link-to claude,cursor`.
 
 While answering: **Enter** skips an optional question (or accepts the default), **`<`** goes back, **`?`** explains why a question matters. Choices accept numbers (`1,3`), labels, or your own words where allowed.
 
@@ -55,6 +57,7 @@ the-lowdown [init] [options]     Run the guided Q&A (default)
 the-lowdown render <file>        Render an answers or brief JSON file
 the-lowdown lint <file>          Check a brief for weak spots (exit 1 on warnings)
 the-lowdown questions            Print the question schema as JSON (for agents)
+the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
 
 -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
 -f, --format <fmt>        markdown | prompt | json  (default: from --out extension)
@@ -63,8 +66,17 @@ the-lowdown questions            Print the question schema as JSON (for agents)
     --save-answers <file> Also save raw answers (edit and re-render later)
     --no-instructions     Leave out the "How to use this brief" section
     --no-checklist        Leave out the definition-of-done checklist
+    --link                After writing, point your agent instruction files at the brief
+    --link-to <list>      claude, agents, cursor, copilot (default: whichever exist, else AGENTS.md)
 -y, --yes                 Don't ask before writing or overwriting
 ```
+
+| `--link-to` | File |
+| --- | --- |
+| `claude` | `CLAUDE.md` |
+| `agents` | `AGENTS.md` |
+| `cursor` | `.cursor/rules/the-lowdown.mdc` (always-applied rule) |
+| `copilot` | `.github/copilot-instructions.md` |
 
 ### Output formats
 
@@ -79,7 +91,7 @@ the-lowdown questions            Print the question schema as JSON (for agents)
 ## API
 
 ```ts
-import { createBrief, buildBrief, lintBrief, renderBrief } from '@pixelatlarge/the-lowdown';
+import { createBrief, buildBrief, lintBrief, linkBrief, renderBrief } from '@pixelatlarge/the-lowdown';
 
 // Answers in, brief out
 const md = createBrief({
@@ -97,6 +109,9 @@ const md = createBrief({
 const brief = buildBrief(answers);           // typed Brief, throws on invalid answers
 const issues = lintBrief(brief);              // [{ level: 'warn' | 'info', field, message }]
 const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json'
+
+// Point agent instruction files at a brief you've written
+linkBrief({ brief: 'BRIEF.md' });             // [{ target, file, action: 'created' | 'added' | 'updated' | 'unchanged' }]
 ```
 
 ### Headless session (build your own UI)
@@ -146,7 +161,7 @@ Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`. 
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `linkBrief`, `detectLinkTargets`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported.
 
 ## Example output
 

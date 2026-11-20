@@ -4,6 +4,7 @@ import { extname } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { buildBrief, isBrief } from './brief.js';
+import { linkBrief, parseLinkTargets, type LinkResult } from './link.js';
 import { lintBrief } from './lint.js';
 import { DEFAULT_QUESTIONS } from './questions.js';
 import { renderBrief, type RenderOptions } from './render.js';
@@ -85,6 +86,7 @@ ${bold('Usage')}
   the-lowdown render <file>        Render an answers or brief JSON file
   the-lowdown lint <file>          Check a brief for weak spots
   the-lowdown questions            Print the question schema as JSON (for agents)
+  the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
 
 ${bold('Options')}
   -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
@@ -94,6 +96,9 @@ ${bold('Options')}
       --save-answers <file> Also save your raw answers as JSON (re-render or edit later)
       --no-instructions     Leave out the "How to use this brief" section
       --no-checklist        Leave out the definition-of-done checklist
+      --link                After writing, point your agent instruction files at the brief
+      --link-to <list>      Which files to link: claude, agents, cursor, copilot (comma-separated).
+                            Default: whichever already exist, or AGENTS.md if none do
   -y, --yes                 Don't ask before writing or overwriting
   -h, --help                Show this help
   -v, --version             Show version
@@ -253,6 +258,20 @@ interface Flags {
   'no-instructions'?: boolean;
   'no-checklist'?: boolean;
   yes?: boolean;
+  link?: boolean;
+  'link-to'?: string;
+}
+
+const wantsLink = (flags: Flags) => Boolean(flags.link || flags['link-to']);
+
+function runLink(brief: string, flags: Flags): LinkResult[] {
+  const targets = flags['link-to'] ? parseLinkTargets(flags['link-to']) : undefined;
+  const results = linkBrief({ brief, targets });
+  for (const r of results) {
+    const verb = { created: 'Created', added: 'Linked', updated: 'Updated', unchanged: 'Already linked:' }[r.action];
+    say((r.action === 'unchanged' ? dim : green)(`✓ ${verb} ${r.file}`));
+  }
+  return results;
 }
 
 function renderOpts(flags: Flags): RenderOptions {
@@ -267,6 +286,7 @@ function emit(content: string, out: string | undefined) {
 async function runInit(flags: Flags) {
   const out = flags.out ?? 'BRIEF.md';
   const format = formatFor(out, flags.format);
+  if (flags['link-to']) parseLinkTargets(flags['link-to']); // fail before the interview, not after
   const prefill = flags.answers ? (readJSON(flags.answers) as Answers) : undefined;
   const session = new BriefSession({ questions: DEFAULT_QUESTIONS, quick: flags.quick, answers: prefill });
   const reader = new LineReader();
@@ -304,7 +324,10 @@ async function runInit(flags: Flags) {
     }
     if (out !== '-') {
       say(green(`✓ Wrote ${out}`) + (flags['save-answers'] ? green(` and ${flags['save-answers']}`) : ''));
-      say(dim(`  Point your agent at it, e.g. add "Follow ${out} for all design decisions." to CLAUDE.md or AGENTS.md.`));
+      if (wantsLink(flags)) runLink(out, flags);
+      else say(dim(`  Point your agent at it: run "the-lowdown link" (or add --link next time).`));
+    } else if (wantsLink(flags)) {
+      say(yellow('  --link skipped: the brief went to stdout. Save it to a file, then run "the-lowdown link <file>".'));
     }
   } finally {
     reader.close();
@@ -315,7 +338,12 @@ function runRender(file: string | undefined, flags: Flags) {
   if (!file) throw new Error('Usage: the-lowdown render <answers-or-brief.json> [-o file] [-f format]');
   const brief = loadBrief(file);
   emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags)), flags.out);
-  if (flags.out && flags.out !== '-') say(green(`✓ Wrote ${flags.out}`));
+  if (flags.out && flags.out !== '-') {
+    say(green(`✓ Wrote ${flags.out}`));
+    if (wantsLink(flags)) runLink(flags.out, flags);
+  } else if (wantsLink(flags)) {
+    throw new Error('--link needs a brief file: add -o BRIEF.md (or another path).');
+  }
 }
 
 function runLint(file: string | undefined): number {
@@ -338,6 +366,8 @@ async function main(argv: string[]): Promise<number> {
       'no-instructions': { type: 'boolean' },
       'no-checklist': { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
+      link: { type: 'boolean' },
+      'link-to': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -363,6 +393,12 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case 'lint':
       return runLint(arg);
+    case 'link': {
+      const brief = arg ?? 'BRIEF.md';
+      if (!existsSync(brief)) throw new Error(`${brief} not found. Run the-lowdown first, or pass the brief's path.`);
+      runLink(brief, flags);
+      return 0;
+    }
     case 'questions':
       emit(JSON.stringify(questionsToJSON(), null, 2) + '\n', flags.out);
       return 0;

@@ -35,6 +35,17 @@ export {
   type RenderOptions,
 } from './render.js';
 export { questionsToJSON, type SerializedQuestion } from './serialize.js';
+export {
+  LINK_TARGETS,
+  detectLinkTargets,
+  linkBlock,
+  linkBrief,
+  linkInstruction,
+  parseLinkTargets,
+  type LinkOptions,
+  type LinkResult,
+  type LinkTarget,
+} from './link.js';
 
 import { buildBrief, type BuildOptions } from './brief.js';
 import { renderBrief, type RenderOptions } from './render.js';

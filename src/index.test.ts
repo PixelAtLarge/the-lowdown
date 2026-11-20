@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,8 @@ import {
   buildBrief,
   createBrief,
   isBrief,
+  linkBrief,
+  linkInstruction,
   lintBrief,
   parseInput,
   questionsToJSON,
@@ -233,5 +235,81 @@ describe('cli', () => {
     const r = spawnSync(process.execPath, [cli, 'render', file, '-f', 'prompt'], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^<design_brief/);
+  });
+});
+
+describe('linkBrief', () => {
+  const fresh = () => mkdtempSync(join(tmpdir(), 'the-lowdown-link-'));
+
+  it('creates AGENTS.md when no instruction files exist', () => {
+    const cwd = fresh();
+    const results = linkBrief({ cwd });
+    assert.deepEqual(results, [{ target: 'agents', file: 'AGENTS.md', action: 'created' }]);
+    const text = readFileSync(join(cwd, 'AGENTS.md'), 'utf8');
+    assert.match(text, /^# AGENTS\.md\n\n<!-- the-lowdown:start -->/);
+    assert.ok(text.includes(linkInstruction('BRIEF.md')));
+  });
+
+  it('adds to existing files, keeps their content, and is idempotent', () => {
+    const cwd = fresh();
+    writeFileSync(join(cwd, 'CLAUDE.md'), '# Project rules\n\nUse pnpm.\n');
+    mkdirSync(join(cwd, '.cursor'));
+    assert.deepEqual(
+      linkBrief({ cwd }).map((r) => `${r.target}:${r.action}`),
+      ['claude:added', 'cursor:created'],
+    );
+    const claude = readFileSync(join(cwd, 'CLAUDE.md'), 'utf8');
+    assert.match(claude, /^# Project rules\n\nUse pnpm\.\n\n<!-- the-lowdown:start -->/);
+    assert.ok(!existsSync(join(cwd, 'AGENTS.md')), 'does not create files that were not asked for');
+    assert.match(readFileSync(join(cwd, '.cursor/rules/the-lowdown.mdc'), 'utf8'), /alwaysApply: true[\s\S]*@BRIEF\.md/);
+
+    assert.deepEqual(linkBrief({ cwd }).map((r) => r.action), ['unchanged', 'unchanged']);
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), claude);
+  });
+
+  it('updates the block in place when the brief path changes', () => {
+    const cwd = fresh();
+    writeFileSync(join(cwd, 'AGENTS.md'), 'Intro\n');
+    linkBrief({ cwd });
+    linkBrief({ cwd, brief: 'docs/brief.md' });
+    const text = readFileSync(join(cwd, 'AGENTS.md'), 'utf8');
+    assert.equal(text.match(/the-lowdown:start/g)?.length, 1);
+    assert.match(text, /Follow docs\/brief\.md/);
+    assert.match(text, /^Intro\n/);
+  });
+
+  it('respects explicit targets and dry runs', () => {
+    const cwd = fresh();
+    const results = linkBrief({ cwd, targets: ['claude', 'copilot'], dryRun: true });
+    assert.deepEqual(results.map((r) => r.file), ['CLAUDE.md', '.github/copilot-instructions.md']);
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md')));
+  });
+});
+
+describe('cli link', () => {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+
+  it('render --link writes the brief and links it', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-cli-'));
+    writeFileSync(join(cwd, 'answers.json'), JSON.stringify(answers));
+    writeFileSync(join(cwd, 'CLAUDE.md'), '# Rules\n');
+    const r = spawnSync(process.execPath, [cli, 'render', 'answers.json', '-o', 'BRIEF.md', '--link'], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /Linked CLAUDE\.md/);
+    assert.match(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), /Follow BRIEF\.md/);
+  });
+
+  it('link command checks the brief exists and validates targets', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-cli-'));
+    let r = spawnSync(process.execPath, [cli, 'link'], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /BRIEF\.md not found/);
+    writeFileSync(join(cwd, 'BRIEF.md'), '# brief\n');
+    r = spawnSync(process.execPath, [cli, 'link', '--link-to', 'claude,vscode'], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Unknown link target "vscode"/);
+    r = spawnSync(process.execPath, [cli, 'link', '--link-to', 'claude'], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /Created CLAUDE\.md/);
   });
 });

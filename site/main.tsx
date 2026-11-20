@@ -8,7 +8,7 @@ import './styles.css';
 
 const REPO = 'https://github.com/PixelAtLarge/the-lowdown';
 const NPM = 'https://www.npmjs.com/package/@pixelatlarge/the-lowdown';
-const VIDEO = 'https://github.com/user-attachments/assets/664fe32c-e3d6-4107-a590-d4331334f937';
+const VIDEO = `${import.meta.env.BASE_URL}the-lowdown-explainer.mp4`;
 const INSTALL = 'npx @pixelatlarge/the-lowdown';
 
 function Mark({ size = 40 }: { size?: number }) {
@@ -122,7 +122,7 @@ function App() {
         <section className="video" aria-label="Explainer video">
           <div className="win">
             <div className="bar"><i /><i /><i /><span>the-lowdown-explainer.mp4</span></div>
-            <video controls preload="none" poster={`${import.meta.env.BASE_URL}og.png`} playsInline>
+            <video controls preload="metadata" poster={`${import.meta.env.BASE_URL}og.png`} playsInline>
               <source src={VIDEO} type="video/mp4" />
               <a href={VIDEO}>Watch the explainer</a>
             </video>

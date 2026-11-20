@@ -11,8 +11,6 @@ import {
   buildBrief,
   createBrief,
   isBrief,
-  linkBrief,
-  linkInstruction,
   lintBrief,
   parseInput,
   questionsToJSON,
@@ -20,6 +18,8 @@ import {
   type Answers,
   type Question,
 } from './index.js';
+import { linkBrief, linkInstruction } from './link.js';
+import { answersFromHash, decodeAnswers, encodeAnswers, shareUrl } from './share.js';
 
 const NOW = new Date('2026-11-05T12:00:00Z');
 
@@ -311,5 +311,29 @@ describe('cli link', () => {
     r = spawnSync(process.execPath, [cli, 'link', '--link-to', 'claude'], { cwd, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /Created CLAUDE\.md/);
+  });
+});
+
+describe('share links', () => {
+  it('round-trips answers through the URL hash and drops empty values', () => {
+    const withEmpty = { ...answers, references: [], antiTone: '' };
+    const url = shareUrl('https://example.com/brief?x=1', withEmpty);
+    assert.match(url, /^https:\/\/example\.com\/brief\?x=1#a=v1\.[\w-]+$/);
+    const back = answersFromHash(new URL(url).hash)!;
+    assert.deepEqual(back, answers);
+    assert.equal(encodeAnswers({ name: 'café — ✓' }).includes('='), false);
+    assert.deepEqual(decodeAnswers(encodeAnswers({ name: 'café — ✓' })), { name: 'café — ✓' });
+  });
+
+  it('ignores missing or malformed tokens', () => {
+    assert.equal(answersFromHash(''), undefined);
+    assert.equal(answersFromHash('#a=garbage'), undefined);
+    assert.equal(answersFromHash('#a=v1.!!!'), undefined);
+    assert.throws(() => decodeAnswers('v2.abc'), /Not a the-lowdown share token/);
+  });
+
+  it('keeps the main entry free of Node built-ins', () => {
+    const src = readFileSync(fileURLToPath(new URL('./index.js', import.meta.url)), 'utf8');
+    assert.doesNotMatch(src, /from ['"]node:|\.\/link\.js|\.\/cli\.js/);
   });
 });

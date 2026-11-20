@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 200" role="img" aria-label="The Lowdown">
+  <g transform="rotate(-9 96 112)">
+    <rect x="38" y="36" width="116" height="148" rx="14" fill="#FFFFFF" stroke="#152A4A" stroke-opacity=".14" stroke-width="2.5"/>
+    <path d="M52 36 h88 a14 14 0 0 1 14 14 v20 h-116 v-20 a14 14 0 0 1 14 -14z" fill="#EAC26C"/>
+    <rect x="58" y="88" width="76" height="9" rx="4.5" fill="#AEC1CF"/>
+    <rect x="58" y="108" width="62" height="9" rx="4.5" fill="#AEC1CF"/>
+    <rect x="58" y="128" width="70" height="9" rx="4.5" fill="#AEC1CF"/>
+    <rect x="58" y="152" width="17" height="17" rx="4" fill="#0F7B52"/>
+    <path d="M62 160.5 l3.5 3.5 l6.5 -7" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="83" y="156" width="40" height="9" rx="4.5" fill="#AEC1CF"/>
+  </g>
+  <g transform="translate(130 14)">
+    <path d="M10 0 h66 a10 10 0 0 1 10 10 v28 a10 10 0 0 1 -10 10 h-50 l-14 12 v-12 h-2 a10 10 0 0 1 -10 -10 v-28 a10 10 0 0 1 10 -10z" fill="#1E4D36"/>
+    <circle cx="27" cy="24" r="5" fill="#fff"/><circle cx="43" cy="24" r="5" fill="#fff"/><circle cx="59" cy="24" r="5" fill="#fff"/>
+  </g>
+</svg>

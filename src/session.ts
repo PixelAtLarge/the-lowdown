@@ -76,6 +76,11 @@ export class BriefSession {
     return { index: cur ? all.indexOf(cur) + 1 : all.length, total: all.length };
   }
 
+  /** True when back() has an earlier question to return to. */
+  get canGoBack(): boolean {
+    return this.history.length > 0;
+  }
+
   /** The value previously given for a question the user went back to. */
   draft(id: string): AnswerValue | undefined {
     return this.drafts[id];

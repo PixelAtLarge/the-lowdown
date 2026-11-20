@@ -1,8 +1,12 @@
+<p align="center"><img src="assets/mark.svg" width="96" alt=""></p>
+
 # the-lowdown
 
 **Give your AI agent the lowdown.** A short guided Q&A that writes a design brief (users, goals, constraints, tone) your agent can follow.
 
 [![npm](https://img.shields.io/npm/v/@pixelatlarge/the-lowdown)](https://www.npmjs.com/package/@pixelatlarge/the-lowdown)
+
+**[Try it in your browser →](https://pixelatlarge.github.io/the-lowdown/)** No install, and nothing leaves your browser unless you share the link.
 
 https://github.com/user-attachments/assets/664fe32c-e3d6-4107-a590-d4331334f937
 
@@ -27,6 +31,8 @@ npx @pixelatlarge/the-lowdown --quick    # ~11 essential questions
 npm i -g @pixelatlarge/the-lowdown
 the-lowdown
 ```
+
+<img src="assets/demo.gif" alt="A quick-mode run in the terminal: eleven questions, a clean review, then BRIEF.md is written and linked from CLAUDE.md" width="760">
 
 Then point your agent at it:
 
@@ -91,7 +97,7 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
 ## API
 
 ```ts
-import { createBrief, buildBrief, lintBrief, linkBrief, renderBrief } from '@pixelatlarge/the-lowdown';
+import { createBrief, buildBrief, lintBrief, renderBrief, shareUrl, answersFromHash } from '@pixelatlarge/the-lowdown';
 
 // Answers in, brief out
 const md = createBrief({
@@ -110,9 +116,33 @@ const brief = buildBrief(answers);           // typed Brief, throws on invalid a
 const issues = lintBrief(brief);              // [{ level: 'warn' | 'info', field, message }]
 const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json'
 
-// Point agent instruction files at a brief you've written
+// Shareable links: answers live in the URL hash, so no server is involved
+const url = shareUrl('https://example.com/brief', answers); // …#a=v1.eyJu…
+const back = answersFromHash(new URL(url).hash);
+
+// Point agent instruction files at a brief (Node only, so it has its own entry point)
+import { linkBrief } from '@pixelatlarge/the-lowdown/link';
 linkBrief({ brief: 'BRIEF.md' });             // [{ target, file, action: 'created' | 'added' | 'updated' | 'unchanged' }]
 ```
+
+The main entry has no Node dependencies, so it runs in the browser as well as in Node.
+
+### React component
+
+The form on the [try-it page](https://pixelatlarge.github.io/the-lowdown/), ready to drop into your own tool. React 18+ is an optional peer dependency.
+
+```tsx
+import { LowdownForm } from '@pixelatlarge/the-lowdown/react';
+import '@pixelatlarge/the-lowdown/react/styles.css'; // optional default theme
+
+<LowdownForm
+  quick
+  onComplete={(brief, answers) => save(brief)}
+  resultActions={({ output }) => <button onClick={() => send(output)}>Send to agent</button>}
+/>
+```
+
+It asks one question at a time, shows the brief check before creating the brief, then offers Markdown, prompt and JSON tabs with copy and download. Props include `questions`, `quick`, `initialAnswers`, `startAtResult`, `onChange`, `onComplete`, `formats`, `renderOptions` and `resultActions`. Restyle it with the `--ld-*` CSS variables (`--ld-accent`, `--ld-font`, `--ld-radius`…), or skip the stylesheet and style the `ld-` classes yourself. `useBriefSession()` is exported too, for building a fully custom UI.
 
 ### Headless session (build your own UI)
 
@@ -161,7 +191,7 @@ Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`. 
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `linkBrief`, `detectLinkTargets`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
 
 ## Example output
 

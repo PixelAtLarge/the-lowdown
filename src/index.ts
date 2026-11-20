@@ -35,17 +35,8 @@ export {
   type RenderOptions,
 } from './render.js';
 export { questionsToJSON, type SerializedQuestion } from './serialize.js';
-export {
-  LINK_TARGETS,
-  detectLinkTargets,
-  linkBlock,
-  linkBrief,
-  linkInstruction,
-  parseLinkTargets,
-  type LinkOptions,
-  type LinkResult,
-  type LinkTarget,
-} from './link.js';
+export { answersFromHash, decodeAnswers, encodeAnswers, shareUrl } from './share.js';
+// linkBrief() writes files, so it lives at '@pixelatlarge/the-lowdown/link' to keep this entry browser-safe.
 
 import { buildBrief, type BuildOptions } from './brief.js';
 import { renderBrief, type RenderOptions } from './render.js';

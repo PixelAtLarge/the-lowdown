@@ -27,6 +27,11 @@ Versioning rule: any breaking change to the brief format (`brief.json`, `schemaV
 - AI uses `ANTHROPIC_API_KEY`, or falls back to a Claude Code login, with Sonnet for drafting, Haiku for the rest, and a per-run budget cap (`--budget`, default $0.25). No new dependencies. `createAssistant` works in the browser with your own model route; Node providers live at `@pixelatlarge/the-lowdown/ai`.
 - The React form asks follow-ups and, given an `assistant`, offers suggested rewrites in the review.
 - `BriefSession.set(id, value)` changes any answer without moving through the interview.
+- **Claude Code skill:** `the-lowdown skill` installs `/lowdown`, which runs the interview in chat, updates an existing brief, drafts from a PRD, or checks finished work. The skill also ships in the package at `skills/lowdown/SKILL.md`.
+- **MCP server:** `the-lowdown mcp` with `get_brief`, `get_questions`, `update_brief` and `check_against_brief`. No dependencies; reads and writes only brief files inside the project.
+- **`the-lowdown check`** prints a self-review checklist from the brief (definition of done, must-avoid, out of scope, tone) with the changed files. `--url` adds curb-cut's accessibility findings when it's installed; `--json` for tooling.
+- **`the-lowdown answers`** prints a brief's answers as JSON, or drafted answers `--from` a document.
+- Running `the-lowdown` where a BRIEF.md exists offers to update it instead of starting over.
 - Brief JSON stays `schemaVersion: 1`: new fields are optional, and briefs saved earlier still render.
 
 ## 0.1.0

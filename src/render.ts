@@ -70,7 +70,8 @@ const specific = (b: Brief, id: string) => b.specifics?.find((x) => x.id === id)
 const guidanceFor = (b: Brief, t: string) => b.tone.guidance?.[t] ?? b.tone.guidance?.[t.toLowerCase()] ?? TONE_GUIDANCE[t.toLowerCase()];
 const toneLabelIn = (b: Brief) => (t: string) => guidanceFor(b, t)?.label ?? t;
 
-function definitionOfDone(b: Brief): string[] {
+/** The definition-of-done checklist rendered at the end of the brief. */
+export function definitionOfDone(b: Brief): string[] {
   const items = [...b.goals.successCriteria];
   if (b.goals.primaryAction) items.push(`"${b.goals.primaryAction}" is the most prominent action on the main screen`);
   for (const a of b.users.accessibility) items.push(`Meets: ${a}`);

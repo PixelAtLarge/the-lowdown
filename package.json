@@ -41,6 +41,10 @@
       "types": "./dist/ai.d.ts",
       "import": "./dist/ai.js"
     },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
@@ -55,6 +59,7 @@
     "CHANGELOG.md",
     "dist",
     "!dist/**/*.test.*",
+    "skills",
     "README.md",
     "LICENSE"
   ],

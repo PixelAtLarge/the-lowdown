@@ -80,8 +80,12 @@ the-lowdown edit [brief]         Re-run the Q&A on an existing brief, current an
 the-lowdown diff <old> <new>     Show what changed between two briefs (exit 1 if they differ)
 the-lowdown render <file>        Render a BRIEF.md, brief JSON or answers JSON file
 the-lowdown lint <file>          Check a brief and score its strength (exit 1 on warnings)
+the-lowdown check [brief]        Checklist for reviewing finished work against the brief
+the-lowdown answers [brief]      Print a brief's answers as JSON (or --from a PRD: drafted answers)
 the-lowdown questions            Print the question schema as JSON (for agents)
 the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
+the-lowdown skill [--global]     Install the /lowdown skill for Claude Code
+the-lowdown mcp                  Run the MCP server
 
 -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
 -f, --format <fmt>        markdown | prompt | json | html  (default: from --out extension; pdf = html)
@@ -100,6 +104,10 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
     --no-ai               Don't use AI, even when it's available
     --model <id>          Claude model for every AI step
     --budget <usd>        AI spend cap for this run (default 0.25)
+    --url <url>           check: also review this preview with curb-cut, when it's installed
+    --base <ref>          check: list files changed since this git ref (default HEAD)
+    --json                check: print the checklist as JSON
+    --global              skill: install for every project (~/.claude/skills)
     --link                After writing, point your agent instruction files at the brief
     --link-to <list>      claude, agents, cursor, copilot (default: whichever exist, else AGENTS.md)
 -y, --yes                 Don't ask before writing or overwriting
@@ -195,7 +203,41 @@ Put a `.lowdownrc.json` in your project (or pass `--config`) to give everyone th
 
 ### Let the agent run the interview
 
-`the-lowdown questions` prints the question schema plus interview instructions. Give it to an agent (Claude Code, Cursor, a custom chat UI) and it can conduct the Q&A conversationally, save the answers as JSON, and run `the-lowdown render answers.json -o BRIEF.md`.
+**Claude Code:** `npx @pixelatlarge/the-lowdown skill` installs a `/lowdown` skill in `.claude/skills` (add `--global` for every project). Then, in Claude Code:
+
+- `/lowdown` interviews you in chat, one question at a time, and writes BRIEF.md. If there's already a brief, it asks what changed rather than starting over.
+- `/lowdown PRD.md` drafts the answers from a document first, so you confirm rather than type.
+- `/lowdown check` reviews the work against the brief before calling it done.
+
+Claude also picks the skill up on its own when you start design work without a brief.
+
+**Any MCP client** (Claude Code, Claude Desktop, Cursor…): run the-lowdown as an MCP server.
+
+```sh
+claude mcp add the-lowdown -- npx -y @pixelatlarge/the-lowdown mcp
+```
+
+| Tool | What it does |
+| --- | --- |
+| `get_brief` | The brief (Markdown, prompt or JSON) with its brief check and strength score |
+| `get_questions` | The interview, with your team config applied, for the agent to ask in chat |
+| `update_brief` | Save answers by question id. Merges with the brief, creates it once the required answers are in, and rejects unknown questions and invalid choices |
+| `check_against_brief` | A checklist for the finished work, plus curb-cut findings when you pass a preview `url` |
+
+It only reads and writes `.md` and `.json` files inside the project. There are no dependencies: it's a small JSON-RPC server over stdio.
+
+**Anything else:** `the-lowdown questions` prints the question schema plus interview instructions, and `the-lowdown answers BRIEF.md` prints the current answers. Any agent can run the interview, save the answers as JSON, and run `the-lowdown render answers.json -o BRIEF.md`.
+
+### Check the work
+
+```sh
+the-lowdown check                                 # Markdown checklist for the agent
+the-lowdown check --url https://my-pr.vercel.app  # plus an accessibility review by curb-cut
+```
+
+`check` turns the brief into a self-review for the agent that did the work. It covers the definition of done, everything on the must-avoid and out-of-scope lists, and what each tone word rules out, plus the files changed since `--base`. The agent answers each item pass, fail or unsure with evidence, fixes the fails and checks again. With `--url` and [curb-cut](https://github.com/PixelAtLarge/curb-cut) installed, it reviews the running preview too, folds in the new findings, and exits 1 when curb-cut fails.
+
+Running `the-lowdown` where a BRIEF.md already exists asks whether to update it, rather than starting over.
 
 ## API
 
@@ -304,7 +346,7 @@ Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`, 
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `toHTML`, `lintBrief`, `scoreBrief`, `scoreTips`, `readBrief`, `diffBriefs`, `parseMarkdownBrief`, `isMarkdownBrief`, `stripFrontmatter`, `markdownToHtml`, `createAssistant`, `followUpFor`, `draftFromText`, `htmlToText`, `questionForField`, `coerceAnswer`, `BudgetError`, `PRICES`, `DEFAULT_MODELS`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `anthropicApi`, `claudeCode`, `autoComplete`, `detectAi` and `readSource` from `@pixelatlarge/the-lowdown/ai`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `toHTML`, `lintBrief`, `scoreBrief`, `scoreTips`, `readBrief`, `diffBriefs`, `parseMarkdownBrief`, `isMarkdownBrief`, `stripFrontmatter`, `markdownToHtml`, `checklist`, `checkPrompt`, `definitionOfDone`, `SKILL_MD`, `createAssistant`, `followUpFor`, `draftFromText`, `htmlToText`, `questionForField`, `coerceAnswer`, `BudgetError`, `PRICES`, `DEFAULT_MODELS`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `anthropicApi`, `claudeCode`, `autoComplete`, `detectAi` and `readSource` from `@pixelatlarge/the-lowdown/ai`; `createMcpHandler`, `serveMcp` and `TOOLS` from `@pixelatlarge/the-lowdown/mcp`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
 
 ## Example output
 

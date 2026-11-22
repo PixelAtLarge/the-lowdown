@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { extname } from 'node:path';
 import { createInterface, emitKeypressEvents, type Interface } from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -9,7 +11,11 @@ import { autoComplete, detectAi, readSource, type AiRoute } from './ai.js';
 import { draftFromText } from './draft.js';
 import { followUpFor } from './followups.js';
 import { diffBriefs, type BriefChange } from './diff.js';
-import { readBrief, type ReadResult } from './read.js';
+import { checklist, checkPrompt } from './check.js';
+import { serveMcp } from './mcp.js';
+import { changedFiles, findCurbCut, isBriefFile, loadProject, readBriefFile as readBriefAt, readJSON, runCurbCut } from './project.js';
+import { SKILL_MD, SKILL_NAME } from './skill.js';
+import type { ReadResult } from './read.js';
 import { scoreBrief, scoreTips } from './score.js';
 import { applyConfig, validateConfig, type LowdownConfig } from './config.js';
 import { linkBrief, parseLinkTargets, type LinkResult } from './link.js';
@@ -180,8 +186,12 @@ ${bold('Usage')}
   the-lowdown diff <old> <new>     Show what changed between two briefs (exit 1 if they differ)
   the-lowdown render <file>        Render a brief (Markdown or JSON) or an answers file
   the-lowdown lint <file>          Check a brief for weak spots and score it
+  the-lowdown check [brief]        Print a checklist for reviewing finished work against the brief
+  the-lowdown answers [brief]      Print a brief's answers as JSON (or --from a PRD: drafted answers)
   the-lowdown questions            Print the question schema as JSON (for agents)
   the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
+  the-lowdown skill [--global]     Install the /lowdown skill for Claude Code
+  the-lowdown mcp                  Run the MCP server (get_brief, update_brief, check_against_brief)
 
 ${bold('Options')}
   -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
@@ -201,6 +211,10 @@ ${bold('Options')}
       --no-ai               Don't use AI, even when it's available
       --model <id>          Claude model for every AI step
       --budget <usd>        AI spend cap for this run (default 0.25)
+      --url <url>           check: also review this preview with curb-cut, when it's installed
+      --base <ref>          check: list files changed since this git ref (default HEAD)
+      --json                check: print the checklist as JSON
+      --global              skill: install for every project (~/.claude/skills)
       --link                After writing, point your agent instruction files at the brief
       --link-to <list>      Which files to link: claude, agents, cursor, copilot (comma-separated).
                             Default: whichever already exist, or AGENTS.md if none do
@@ -242,21 +256,8 @@ function formatFor(out: string | undefined, explicit: string | undefined): Outpu
   return 'markdown';
 }
 
-function readJSON(path: string): unknown {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch (e) {
-    throw new Error(`Could not read ${path}: ${(e as Error).message}`);
-  }
-}
-
 function readBriefFile(path: string, loaded: { questions: Question[]; toneGuidance: Record<string, ToneGuidance> }): ReadResult {
-  if (!existsSync(path)) throw new Error(`${path} not found.`);
-  try {
-    return readBrief(readFileSync(path, 'utf8'), { questions: loaded.questions, toneGuidance: loaded.toneGuidance });
-  } catch (e) {
-    throw new Error(`Could not read ${path}: ${(e as Error).message}`);
-  }
+  return readBriefAt(path, loaded);
 }
 
 function printScore(brief: Brief, issues: LintIssue[]) {
@@ -648,9 +649,11 @@ interface Flags {
   'no-ai'?: boolean;
   model?: string;
   budget?: string;
+  url?: string;
+  base?: string;
+  json?: boolean;
+  global?: boolean;
 }
-
-const CONFIG_FILES = ['.lowdownrc.json', '.lowdownrc', 'lowdown.config.json'];
 
 interface Loaded {
   config: LowdownConfig;
@@ -662,12 +665,7 @@ interface Loaded {
 }
 
 function loadConfig(flags: Flags): Loaded {
-  const file = flags.config ?? CONFIG_FILES.find((f) => existsSync(f));
-  if (flags.config && !existsSync(flags.config)) throw new Error(`Config file ${flags.config} not found.`);
-  const config = (file ? readJSON(file) : {}) as LowdownConfig;
-  const errors = validateConfig(config);
-  if (errors.length) throw new Error(`${file}:\n  ${errors.join('\n  ')}`);
-  return { config, file, ...applyConfig(config) };
+  return loadProject(flags.config);
 }
 
 /** Command-line flags win over the config file. */
@@ -710,6 +708,18 @@ async function runInit(rawFlags: Flags) {
   const loaded = loadConfig(rawFlags);
   const flags = withConfig(rawFlags, loaded.config);
   const out = flags.out ?? 'BRIEF.md';
+  // An existing brief: offer to update it rather than start over.
+  if (out !== '-' && !rawFlags.from && existsSync(out) && isBriefFile(out, loaded)) {
+    const tty = Boolean(process.stdin.isTTY);
+    if (tty && !flags.yes) {
+      const reader = new LineReader();
+      const a = await reader.ask(`${bold(out)} already exists. Update it instead of starting over? ${dim('(Y/n)')} `);
+      reader.close();
+      if (a === null || !/^n/i.test(a.trim())) return runEdit(out, rawFlags);
+    } else if (!flags.yes) {
+      say(dim(`${out} already exists. To change it rather than replace it, run "the-lowdown edit".`));
+    }
+  }
   const format = formatFor(out, flags.format);
   if (flags['link-to']) parseLinkTargets(flags['link-to']); // fail before the interview, not after
   const prefill = { ...loaded.answers, ...(flags.answers ? (readJSON(flags.answers) as Answers) : {}) };
@@ -891,6 +901,68 @@ async function runEdit(file: string | undefined, rawFlags: Flags) {
   }
 }
 
+async function runCheck(file: string | undefined, flags: Flags): Promise<number> {
+  const loaded = loadConfig(flags);
+  const path = file ?? 'BRIEF.md';
+  if (!existsSync(path)) throw new Error(`${path} not found. Write a brief first: run the-lowdown.`);
+  const { brief } = readBriefFile(path, loaded);
+  if (flags.json) {
+    emit(JSON.stringify({ brief: path, project: brief.project.name, items: checklist(brief) }, null, 2) + '\n', flags.out);
+    return 0;
+  }
+  let findings;
+  let findingsSource;
+  let failed = false;
+  if (flags.url) {
+    const bin = findCurbCut();
+    if (!bin) say(dim(`To add an automated accessibility review of ${flags.url}, install curb-cut: npm i -D @pixelatlarge/curb-cut`));
+    else {
+      say(dim(`Running curb-cut on ${flags.url}…`));
+      try {
+        const r = await runCurbCut(bin, flags.url);
+        ({ findings } = r);
+        findingsSource = r.source;
+        failed = r.failed;
+      } catch (e) {
+        say(yellow(`  curb-cut didn't finish: ${(e as Error).message}`));
+      }
+    }
+  }
+  emit(checkPrompt(brief, { briefPath: path, changedFiles: changedFiles(flags.base ?? 'HEAD'), findings, findingsSource }), flags.out);
+  return failed ? 1 : 0;
+}
+
+async function runAnswers(file: string | undefined, flags: Flags) {
+  const loaded = loadConfig(flags);
+  let answers: Answers;
+  if (flags.from) {
+    answers = await draftFrom(flags.from, loaded.questions, makeAi(flags, loaded.config, loaded.questions));
+  } else {
+    const path = file ?? 'BRIEF.md';
+    answers = readBriefFile(path, loaded).answers;
+  }
+  const json = JSON.stringify(answers, null, 2) + '\n';
+  if (flags.out && flags.out !== '-') {
+    mkdirSync(dirname(flags.out), { recursive: true });
+    writeFileSync(flags.out, json);
+    say(green(`✓ Wrote ${flags.out}`));
+  } else process.stdout.write(json);
+}
+
+function runSkill(flags: Flags) {
+  const root = flags.global ? join(homedir(), '.claude', 'skills') : join('.claude', 'skills');
+  const file = join(root, SKILL_NAME, 'SKILL.md');
+  const existed = existsSync(file);
+  if (existed && readFileSync(file, 'utf8') === SKILL_MD) {
+    say(dim(`✓ ${file} is already up to date.`));
+    return;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, SKILL_MD);
+  say(green(`✓ ${existed ? 'Updated' : 'Installed'} ${file}`));
+  say(dim(`  In Claude Code, type /${SKILL_NAME} to write a brief, /${SKILL_NAME} update to change it, or /${SKILL_NAME} check before calling work done.`));
+}
+
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -917,6 +989,10 @@ async function main(argv: string[]): Promise<number> {
       'no-ai': { type: 'boolean' },
       model: { type: 'string' },
       budget: { type: 'string' },
+      url: { type: 'string' },
+      base: { type: 'string' },
+      json: { type: 'boolean' },
+      global: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -953,6 +1029,17 @@ async function main(argv: string[]): Promise<number> {
       runLink(brief, flags);
       return 0;
     }
+    case 'check':
+      return await runCheck(arg, flags);
+    case 'answers':
+      await runAnswers(arg, flags);
+      return 0;
+    case 'skill':
+      runSkill(flags);
+      return 0;
+    case 'mcp':
+      await serveMcp({ config: flags.config, version: readVersion() });
+      return 0;
     case 'questions': {
       const loaded = loadConfig(flags);
       emit(JSON.stringify(questionsToJSON(loaded.questions, loaded.sections), null, 2) + '\n', flags.out);

@@ -39,6 +39,8 @@ export { applyConfig, validateConfig, type ConfigQuestion, type LowdownConfig, t
 export { BriefSession, type AnswerResult, type SessionOptions } from './session.js';
 export { buildBrief, isBrief, parseReference, type BuildOptions } from './brief.js';
 export { lintBrief, questionForField } from './lint.js';
+export { checklist, checkPrompt, type CheckGroup, type CheckItem, type CheckOptions, type Finding } from './check.js';
+export { SKILL_MD, SKILL_NAME } from './skill.js';
 export { followUpFor, type FollowUp } from './followups.js';
 export { draftFromText, htmlToText } from './draft.js';
 export {
@@ -65,6 +67,7 @@ export { isMarkdownBrief, markdownToHtml, parseMarkdownBrief, stripFrontmatter, 
 export {
   AGENT_INSTRUCTIONS,
   CONTENT_GUIDANCE,
+  definitionOfDone,
   FIDELITY_GUIDANCE,
   renderBrief,
   toHTML,

@@ -31,6 +31,7 @@ export const INTERVIEW_INSTRUCTIONS = [
   'Accept natural answers and map them to choice values where they clearly match; keep anything else verbatim when allowOther is true.',
   'For list questions, collect several short items. For multiselect, respect max. For scale, ask for a whole number between min and max. For rank, ask the person to order the items (from rankFrom answer or choices) most important first.',
   'Skip a question whose condition does not match the answers so far; a goals ranking only applies when there are two or more goals.',
+  'If an answer is too vague to design from ("Everyone", a goal that is only an adjective like "intuitive", several primary actions), ask one short follow-up before moving on.',
   'Do not invent answers. When finished, write the answers as a JSON object keyed by question id and render it with `the-lowdown render <file>`.',
 ].join(' ');
 

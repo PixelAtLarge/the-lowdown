@@ -15,6 +15,9 @@ import {
   lintBrief,
   parseInput,
   BudgetError,
+  SKILL_MD,
+  checklist,
+  checkPrompt,
   createAssistant,
   diffBriefs,
   draftFromText,
@@ -38,6 +41,7 @@ import {
 } from './index.js';
 import { linkBrief, linkInstruction } from './link.js';
 import { anthropicApi, claudeCode, readSource } from './ai.js';
+import { createMcpHandler } from './mcp.js';
 import { answersFromHash, decodeAnswers, encodeAnswers, shareUrl } from './share.js';
 
 const NOW = new Date('2026-11-05T12:00:00Z');
@@ -1152,4 +1156,229 @@ describe('cli: AI assistance', () => {
     r = await run(['lint', 'a.json', '--suggest', '--no-ai'], cwd, '', env);
     assert.match(r.out, /need AI: set ANTHROPIC_API_KEY/);
   }));
+});
+
+// ── Agent integration ────────────────────────────────────────
+
+const agentAnswers: Answers = {
+  name: 'Coach Finder',
+  summary: 'Helps new members find a coach and book a first session.',
+  fidelity: 'prototype',
+  primaryUsers: 'Busy parents booking on their phone',
+  goals: ['Book in under 2 minutes'],
+  primaryAction: 'Book a session',
+  nonGoals: ['Payments'],
+  mustAvoid: ['Carousels'],
+  tone: ['calm'],
+};
+
+/** A stand-in for curb-cut: writes a report.json like the real one. */
+function fakeCurbCut(cwd: string, failed: boolean) {
+  const bin = join(cwd, 'node_modules', '.bin');
+  mkdirSync(bin, { recursive: true });
+  const report = { failed, pages: [{ page: '/', issues: [
+    { severity: 'minor', title: 'Vague link text', fix: 'Say where the link goes' },
+    { severity: 'serious', title: 'Low contrast on the Book button', fix: 'Darken the button to 4.5:1' },
+    { severity: 'serious', title: 'Old issue', isNew: false },
+  ] }] };
+  writeFileSync(join(bin, 'curb-cut'), `#!/usr/bin/env node
+const a = process.argv.slice(2); const out = a[a.indexOf('--out') + 1];
+require('fs').writeFileSync(require('path').join(out, 'report.json'), ${JSON.stringify(JSON.stringify(report))});
+require('fs').writeFileSync(${JSON.stringify(join(cwd, 'curb-cut-args.json'))}, JSON.stringify(a));
+`);
+  chmodSync(join(bin, 'curb-cut'), 0o755);
+}
+
+describe('check', () => {
+  const brief = buildBrief(agentAnswers, { now: NOW });
+
+  it('lists what to verify, grouped', () => {
+    const items = checklist(brief);
+    const of = (g: string) => items.filter((i) => i.group === g).map((i) => i.text);
+    assert.ok(of('Definition of done').includes('Book in under 2 minutes'));
+    assert.ok(of('Definition of done').includes('"Book a session" is the most prominent action on the main screen'));
+    assert.deepEqual(of('Must avoid'), ['Not present: Carousels']);
+    assert.deepEqual(of('Out of scope'), ['Not built: Payments']);
+    assert.match(of('Tone')[0]!, /^Calm: none of urgency cues/);
+    assert.ok(!of('Definition of done').some((t) => /must-avoid|out of scope/.test(t)), 'no duplicate summary items');
+    assert.deepEqual(items.map((i) => i.id), items.map((_, n) => `c${n + 1}`));
+  });
+
+  it('writes a self-review prompt with findings and changed files', () => {
+    const md = checkPrompt(brief, { changedFiles: ['src/App.tsx'], findings: [{ severity: 'serious', title: 'Low contrast', page: '/', fix: 'Darken it' }], findingsSource: 'curb-cut on http://x' });
+    assert.match(md, /^# Check the work against BRIEF\.md: Coach Finder/);
+    assert.match(md, /\*\*pass\*\*, \*\*fail\*\* or \*\*unsure\*\*/);
+    assert.match(md, /- \[ \] c1\. Book in under 2 minutes/);
+    assert.match(md, /## Automated review \(curb-cut on http:\/\/x\)\n\n- \*\*serious:\*\* Low contrast \(\/\)\. Fix: Darken it/);
+    assert.match(md, /## Changed files\n\n- src\/App\.tsx/);
+    assert.match(md, /\*\*Fidelity:\*\* Prototype/);
+  });
+});
+
+describe('Claude Code skill', () => {
+  it('is a valid skill that becomes /lowdown', () => {
+    const fm = /^---\n([\s\S]*?)\n---\n/.exec(SKILL_MD)![1]!;
+    assert.match(fm, /^name: lowdown$/m);
+    assert.match(fm, /^description: .{40,1024}$/m);
+    assert.match(fm, /^argument-hint: /m);
+    assert.match(SKILL_MD, /\$ARGUMENTS/);
+    assert.match(SKILL_MD, /lowdown check/);
+  });
+
+  it('ships the same file in the package', () => {
+    const shipped = readFileSync(fileURLToPath(new URL('../skills/lowdown/SKILL.md', import.meta.url)), 'utf8');
+    assert.equal(shipped, SKILL_MD);
+  });
+});
+
+describe('MCP server', () => {
+  const setup = () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-mcp-'));
+    let id = 0;
+    const handle = createMcpHandler({ cwd, version: '9.9.9' });
+    const rpc = (method: string, params?: Record<string, unknown>) => handle({ jsonrpc: '2.0', id: ++id, method, params }) as Promise<{ result?: any; error?: { code: number; message: string } }>;
+    const tool = async (name: string, args: Record<string, unknown> = {}) => {
+      const r = (await rpc('tools/call', { name, arguments: args })).result as { content: Array<{ text: string }>; isError?: boolean };
+      return { text: r.content[0]!.text, isError: Boolean(r.isError) };
+    };
+    return { cwd, handle, rpc, tool };
+  };
+
+  it('initializes and lists its tools', async () => {
+    const { handle, rpc } = setup();
+    const init = (await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } })).result;
+    assert.equal(init.protocolVersion, '2025-06-18');
+    assert.equal(init.serverInfo.version, '9.9.9');
+    assert.deepEqual(init.capabilities.tools, { listChanged: false });
+    assert.match(init.instructions, /get_brief/);
+    assert.equal((await rpc('initialize', { protocolVersion: '1999-01-01' })).result.protocolVersion, '2025-11-25');
+    assert.equal(await handle({ jsonrpc: '2.0', method: 'notifications/initialized' }), undefined);
+    const tools = (await rpc('tools/list')).result.tools.map((t: { name: string }) => t.name);
+    assert.deepEqual(tools, ['get_brief', 'get_questions', 'update_brief', 'check_against_brief']);
+    assert.equal((await rpc('nope/method')).error?.code, -32601);
+    assert.equal((await rpc('tools/call', { name: 'ghost' })).error?.code, -32602);
+  });
+
+  it('creates, reads and updates a brief, and refuses bad input', async () => {
+    const { cwd, tool } = setup();
+    let r = await tool('get_brief');
+    assert.ok(r.isError && /No brief/.test(r.text));
+    r = await tool('update_brief', { answers: { name: 'Coach Finder' } });
+    assert.ok(r.isError && /Nothing saved.*summary/s.test(r.text), r.text);
+    assert.ok(!existsSync(join(cwd, 'BRIEF.md')));
+    r = await tool('update_brief', { answers: { ...agentAnswers, ghost: 'x' } });
+    assert.ok(r.isError && /ghost: no such question/.test(r.text));
+    r = await tool('update_brief', { answers: { ...agentAnswers, fidelity: 'nonsense' } });
+    assert.ok(r.isError && /fidelity: Choose one of/.test(r.text));
+    r = await tool('update_brief', { answers: agentAnswers });
+    assert.ok(!r.isError, r.text);
+    assert.match(r.text, /Created BRIEF\.md[\s\S]*Brief strength: \d+\/100/);
+    assert.match(readFileSync(join(cwd, 'BRIEF.md'), 'utf8'), /^---\nbrief: the-lowdown/);
+    r = await tool('update_brief', { answers: { primaryUsers: 'Clinic staff on a shared desktop' }, remove: ['mustAvoid'] });
+    assert.match(r.text, /Updated BRIEF\.md[\s\S]*Primary user: "Busy parents booking on their phone" → "Clinic staff on a shared desktop"[\s\S]*Must avoid: -"Carousels"/);
+    r = await tool('get_brief', { format: 'prompt' });
+    assert.match(r.text, /<design_brief/);
+    assert.match(r.text, /Clinic staff on a shared desktop/);
+    assert.match((await tool('get_questions')).text, /"id": "primaryUsers"/);
+    for (const path of ['../x.md', '/etc/passwd.md', 'notes.txt']) assert.ok((await tool('update_brief', { path, answers: {} })).isError, path);
+  });
+
+  it('keeps an answers JSON file as answers', async () => {
+    const { cwd, tool } = setup();
+    await tool('update_brief', { path: 'docs/answers.json', answers: agentAnswers });
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'docs/answers.json'), 'utf8')).goals, ['Book in under 2 minutes']);
+  });
+
+  it('checks against the brief, with curb-cut when installed', async () => {
+    const { cwd, tool } = setup();
+    await tool('update_brief', { answers: agentAnswers });
+    let r = await tool('check_against_brief', { url: 'http://localhost:9' });
+    assert.match(r.text, /Not built: Payments/);
+    assert.match(r.text, /Install @pixelatlarge\/curb-cut/);
+    fakeCurbCut(cwd, true);
+    r = await tool('check_against_brief', { url: 'http://localhost:9' });
+    assert.match(r.text, /## Automated review \(curb-cut on http:\/\/localhost:9\)\n\n- \*\*serious:\*\* Low contrast on the Book button/);
+    assert.ok(!/Old issue/.test(r.text), 'issues that exist on production are left out');
+  });
+
+  it('speaks JSON-RPC over stdio', () => {
+    const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-mcp-stdio-'));
+    const input = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'update_brief', arguments: { answers: agentAnswers } } },
+    ].map((m) => JSON.stringify(m)).join('\n') + '\nnot json\n';
+    const r = spawnSync(process.execPath, [cli, 'mcp'], { cwd, input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((l) => l.id), [1, 2, null]);
+    assert.equal(lines[2].error.code, -32700);
+    assert.ok(existsSync(join(cwd, 'BRIEF.md')));
+  });
+});
+
+describe('cli: agent commands', () => {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const run = (args: string[], cwd: string, env: Record<string, string> = {}) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8', input: '', env: { ...process.env, NO_COLOR: '1', THE_LOWDOWN_NO_AI: '1', ...env } });
+  const setup = () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-agent-'));
+    writeFileSync(join(cwd, 'answers.json'), JSON.stringify(agentAnswers));
+    assert.equal(run(['render', 'answers.json', '-o', 'BRIEF.md'], cwd).status, 0);
+    return cwd;
+  };
+
+  it('check prints the checklist, as Markdown or JSON', () => {
+    const cwd = setup();
+    let r = run(['check'], cwd);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /# Check the work against BRIEF\.md: Coach Finder/);
+    r = run(['check', '--json'], cwd);
+    const json = JSON.parse(r.stdout);
+    assert.equal(json.project, 'Coach Finder');
+    assert.ok(json.items.some((i: { text: string }) => i.text === 'Not present: Carousels'));
+    r = run(['check', '--url', 'http://localhost:9'], cwd);
+    assert.match(r.stderr, /install curb-cut/);
+    assert.ok(!/Automated review/.test(r.stdout));
+    assert.notEqual(run(['check', 'missing.md'], cwd).status, 0);
+  });
+
+  it('check hands off to curb-cut and exits 1 when it fails', () => {
+    const cwd = setup();
+    fakeCurbCut(cwd, true);
+    const r = run(['check', '--url', 'http://localhost:9'], cwd);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /\*\*serious:\*\* Low contrast on the Book button/);
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'curb-cut-args.json'), 'utf8')).slice(0, 3), ['review', '--url', 'http://localhost:9']);
+    fakeCurbCut(cwd, false);
+    assert.equal(run(['check', '--url', 'http://localhost:9'], cwd).status, 0);
+  });
+
+  it('answers prints a brief’s answers, or drafts them --from a document', () => {
+    const cwd = setup();
+    let r = run(['answers'], cwd);
+    assert.deepEqual(JSON.parse(r.stdout).nonGoals, ['Payments']);
+    writeFileSync(join(cwd, 'PRD.md'), PRD);
+    r = run(['answers', '--from', 'PRD.md', '-o', '.lowdown/draft.json'], cwd);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(readFileSync(join(cwd, '.lowdown/draft.json'), 'utf8')).name, 'Coach Finder');
+  });
+
+  it('skill installs the /lowdown skill, in the project or globally', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-skill-'));
+    let r = run(['skill'], cwd);
+    assert.match(r.stderr, /Installed \.claude\/skills\/lowdown\/SKILL\.md/);
+    assert.equal(readFileSync(join(cwd, '.claude/skills/lowdown/SKILL.md'), 'utf8'), SKILL_MD);
+    r = run(['skill'], cwd);
+    assert.match(r.stderr, /already up to date/);
+    const home = mkdtempSync(join(tmpdir(), 'the-lowdown-home-'));
+    r = run(['skill', '--global'], cwd, { HOME: home, USERPROFILE: home });
+    assert.ok(existsSync(join(home, '.claude/skills/lowdown/SKILL.md')), r.stderr);
+  });
+
+  it('notices an existing brief', () => {
+    const cwd = setup();
+    const r = run(['--quick'], cwd);
+    assert.match(r.stderr, /BRIEF\.md already exists\. To change it rather than replace it, run "the-lowdown edit"/);
+  });
 });

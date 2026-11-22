@@ -1,12 +1,14 @@
 import { isApplicable, isEmpty, normalizeAnswer, validateAnswer } from './answers.js';
 import { BUILT_IN_IDS, DEFAULT_QUESTIONS } from './questions.js';
-import type { AnswerValue, Answers, Brief, ExtraField, Question, Reference } from './types.js';
+import type { AnswerValue, Answers, Brief, ExtraField, Question, Reference, ToneGuidance } from './types.js';
 
 export interface BuildOptions {
   questions?: Question[];
   now?: Date;
   /** Throw if a required answer is missing or invalid. Default true. */
   strict?: boolean;
+  /** Do/avoid guidance for custom (or redefined) tone words; the ones used are stored in the brief. */
+  toneGuidance?: Record<string, ToneGuidance>;
 }
 
 const str = (v: AnswerValue | undefined): string | undefined => {
@@ -113,6 +115,7 @@ export function buildBrief(input: Answers, opts: BuildOptions = {}): Brief {
     },
     tone: {
       traits: arr(answers.tone),
+      ...toneGuidanceFor(arr(answers.tone), opts.toneGuidance),
       references: arr(answers.references),
       avoid: str(answers.antiTone),
     },
@@ -129,4 +132,10 @@ export function isBrief(value: unknown): value is Brief {
     (value as Brief).schemaVersion === 1 &&
     typeof (value as Brief).project === 'object'
   );
+}
+
+function toneGuidanceFor(traits: string[], custom?: Record<string, ToneGuidance>): { guidance?: Record<string, ToneGuidance> } {
+  if (!custom) return {};
+  const used = Object.fromEntries(traits.filter((t) => custom[t]).map((t) => [t, custom[t]!]));
+  return Object.keys(used).length ? { guidance: used } : {};
 }

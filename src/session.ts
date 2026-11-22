@@ -1,7 +1,7 @@
 import { isApplicable, isEmpty, normalizeAnswer, parseInput, validateAnswer } from './answers.js';
 import { buildBrief } from './brief.js';
 import { DEFAULT_QUESTIONS, SECTIONS } from './questions.js';
-import type { AnswerValue, Answers, Brief, Question, Section } from './types.js';
+import type { AnswerValue, Answers, Brief, Question, Section, ToneGuidance } from './types.js';
 
 export interface SessionOptions {
   /** Defaults to DEFAULT_QUESTIONS. */
@@ -12,6 +12,8 @@ export interface SessionOptions {
   quick?: boolean;
   /** Section titles and intros. Defaults to SECTIONS. */
   sections?: Section[];
+  /** Do/avoid guidance for custom tone words (e.g. from a config's `tones`). */
+  toneGuidance?: Record<string, ToneGuidance>;
 }
 
 export type AnswerResult = { ok: true } | { ok: false; error: string };
@@ -25,6 +27,7 @@ export class BriefSession {
   readonly questions: Question[];
   readonly sections: Section[];
   readonly quick: boolean;
+  readonly toneGuidance?: Record<string, ToneGuidance>;
   private readonly _answers: Answers;
   private readonly skipped = new Set<string>();
   private readonly drafts: Answers = {};
@@ -33,6 +36,7 @@ export class BriefSession {
   constructor(opts: SessionOptions = {}) {
     this.questions = opts.questions ?? DEFAULT_QUESTIONS;
     this.quick = opts.quick ?? false;
+    this.toneGuidance = opts.toneGuidance;
     const base = opts.sections ?? SECTIONS;
     const extraSections = [...new Set(this.questions.map((q) => q.section))]
       .filter((id) => !base.some((s) => s.id === id))
@@ -142,7 +146,7 @@ export class BriefSession {
     if (missing.length) {
       throw new Error(`Missing required answers: ${missing.map((q) => q.id).join(', ')}`);
     }
-    return buildBrief(this._answers, { questions: this.questions, now });
+    return buildBrief(this._answers, { questions: this.questions, now, toneGuidance: this.toneGuidance });
   }
 }
 

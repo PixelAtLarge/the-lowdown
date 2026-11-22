@@ -4,7 +4,9 @@ import { extname } from 'node:path';
 import { createInterface, emitKeypressEvents, type Interface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { rankItems, scaleRange } from './answers.js';
-import { buildBrief, isBrief } from './brief.js';
+import { diffBriefs, type BriefChange } from './diff.js';
+import { readBrief, type ReadResult } from './read.js';
+import { scoreBrief, scoreTips } from './score.js';
 import { applyConfig, validateConfig, type LowdownConfig } from './config.js';
 import { linkBrief, parseLinkTargets, type LinkResult } from './link.js';
 import { lintBrief } from './lint.js';
@@ -12,7 +14,7 @@ import { createMenu, menuReducer, renderMenu, type MenuItem, type MenuKey, type 
 import { renderBrief, type RenderOptions } from './render.js';
 import { questionsToJSON } from './serialize.js';
 import { BriefSession } from './session.js';
-import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question, Section } from './types.js';
+import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question, Section, ToneGuidance } from './types.js';
 
 // ── Terminal helpers ─────────────────────────────────────────
 
@@ -170,14 +172,16 @@ const HELP = `${bold('the-lowdown')} — give your AI agent the lowdown. A short
 
 ${bold('Usage')}
   the-lowdown [init] [options]     Run the guided Q&A (default)
-  the-lowdown render <file>        Render an answers or brief JSON file
-  the-lowdown lint <file>          Check a brief for weak spots
+  the-lowdown edit [file]          Reopen a brief (default BRIEF.md) with its answers as defaults
+  the-lowdown diff <old> <new>     Show what changed between two briefs (exit 1 if they differ)
+  the-lowdown render <file>        Render a brief (Markdown or JSON) or an answers file
+  the-lowdown lint <file>          Check a brief for weak spots and score it
   the-lowdown questions            Print the question schema as JSON (for agents)
   the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
 
 ${bold('Options')}
   -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
-  -f, --format <fmt>        markdown | prompt | json  (default: from --out extension, else markdown)
+  -f, --format <fmt>        markdown | prompt | json | html  (default: from --out extension, else markdown)
   -q, --quick               Essential questions only
       --answers <file>      Prefill answers from JSON; only missing questions are asked
       --config <file>       Team config (default: .lowdownrc.json, .lowdownrc or lowdown.config.json if present)
@@ -185,6 +189,8 @@ ${bold('Options')}
       --save-answers <file> Also save your raw answers as JSON (re-render or edit later)
       --no-instructions     Leave out the "How to use this brief" section
       --no-checklist        Leave out the definition-of-done checklist
+      --no-frontmatter      Leave out the small front matter block at the top of BRIEF.md
+      --only <list>         edit: only re-ask these sections or question ids (e.g. tone,goals)
       --link                After writing, point your agent instruction files at the brief
       --link-to <list>      Which files to link: claude, agents, cursor, copilot (comma-separated).
                             Default: whichever already exist, or AGENTS.md if none do
@@ -213,10 +219,12 @@ function formatFor(out: string | undefined, explicit: string | undefined): Outpu
   if (f === 'md' || f === 'markdown') return 'markdown';
   if (f === 'json') return 'json';
   if (f === 'prompt' || f === 'xml') return 'prompt';
-  if (f) throw new Error(`Unknown format "${explicit}". Use markdown, prompt or json.`);
+  if (f === 'html' || f === 'pdf') return 'html';
+  if (f) throw new Error(`Unknown format "${explicit}". Use markdown, prompt, json or html.`);
   const ext = out && out !== '-' ? extname(out).toLowerCase() : '';
   if (ext === '.json') return 'json';
   if (ext === '.xml' || ext === '.txt' || ext === '.prompt') return 'prompt';
+  if (ext === '.html' || ext === '.htm') return 'html';
   return 'markdown';
 }
 
@@ -228,13 +236,33 @@ function readJSON(path: string): unknown {
   }
 }
 
-function loadBrief(path: string, questions?: Question[]): Brief {
-  const data = readJSON(path);
-  if (isBrief(data)) return data;
-  if (data && typeof data === 'object' && !Array.isArray(data)) {
-    return buildBrief(data as Answers, { questions });
+function readBriefFile(path: string, loaded: { questions: Question[]; toneGuidance: Record<string, ToneGuidance> }): ReadResult {
+  if (!existsSync(path)) throw new Error(`${path} not found.`);
+  try {
+    return readBrief(readFileSync(path, 'utf8'), { questions: loaded.questions, toneGuidance: loaded.toneGuidance });
+  } catch (e) {
+    throw new Error(`Could not read ${path}: ${(e as Error).message}`);
   }
-  throw new Error(`${path} is neither a brief nor an answers object.`);
+}
+
+function printScore(brief: Brief, issues: LintIssue[]) {
+  const s = scoreBrief(brief, issues);
+  const color = s.score >= 70 ? green : s.score >= 45 ? yellow : red;
+  say(`${bold('Brief strength:')} ${color(`${s.score}/100 · ${s.grade}`)}`);
+  for (const t of scoreTips(s)) say(dim(`  + ${t}`));
+}
+
+function printChanges(changes: BriefChange[]) {
+  for (const c of changes) {
+    say(bold(c.label) + (c.kind === 'list' && c.reordered ? dim('  (reordered)') : ''));
+    if (c.kind === 'list') {
+      c.removed.forEach((x) => say(red(`  - ${x}`)));
+      c.added.forEach((x) => say(green(`  + ${x}`)));
+    } else {
+      if (c.before !== undefined) say(red(`  - ${c.before}`));
+      if (c.after !== undefined) say(green(`  + ${c.after}`));
+    }
+  }
 }
 
 function printIssues(issues: LintIssue[]) {
@@ -430,6 +458,8 @@ interface Flags {
   'link-to'?: string;
   config?: string;
   plain?: boolean;
+  only?: string;
+  'no-frontmatter'?: boolean;
 }
 
 const CONFIG_FILES = ['.lowdownrc.json', '.lowdownrc', 'lowdown.config.json'];
@@ -440,6 +470,7 @@ interface Loaded {
   questions: Question[];
   sections: Section[];
   answers: Answers;
+  toneGuidance: Record<string, ToneGuidance>;
 }
 
 function loadConfig(flags: Flags): Loaded {
@@ -478,8 +509,8 @@ function runLink(brief: string, flags: Flags): LinkResult[] {
   return results;
 }
 
-function renderOpts(flags: Flags, sections?: Section[]): RenderOptions {
-  return { instructions: !flags['no-instructions'], checklist: !flags['no-checklist'], sections };
+function renderOpts(flags: Flags, sections?: Section[], toFile = false): RenderOptions {
+  return { instructions: !flags['no-instructions'], checklist: !flags['no-checklist'], sections, frontmatter: toFile && !flags['no-frontmatter'] };
 }
 
 function emit(content: string, out: string | undefined) {
@@ -494,7 +525,7 @@ async function runInit(rawFlags: Flags) {
   const format = formatFor(out, flags.format);
   if (flags['link-to']) parseLinkTargets(flags['link-to']); // fail before the interview, not after
   const prefill = { ...loaded.answers, ...(flags.answers ? (readJSON(flags.answers) as Answers) : {}) };
-  const session = new BriefSession({ questions: loaded.questions, sections: loaded.sections, quick: flags.quick, answers: prefill });
+  const session = new BriefSession({ questions: loaded.questions, sections: loaded.sections, quick: flags.quick, answers: prefill, toneGuidance: loaded.toneGuidance });
   const reader = new LineReader();
   const menus = reader.terminal && !flags.plain && typeof process.stdin.setRawMode === 'function';
 
@@ -514,6 +545,7 @@ async function runInit(rawFlags: Flags) {
     say();
     say(bold('Review'));
     printIssues(issues);
+    printScore(brief, issues);
     say();
 
     const target = out === '-' ? 'stdout' : out;
@@ -526,7 +558,7 @@ async function runInit(rawFlags: Flags) {
       return;
     }
 
-    emit(renderBrief(brief, format, renderOpts(flags, session.sections)), out);
+    emit(renderBrief(brief, format, renderOpts(flags, session.sections, out !== '-')), out);
     if (flags['save-answers']) {
       writeFileSync(flags['save-answers'], JSON.stringify(session.answers, null, 2) + '\n');
     }
@@ -546,8 +578,9 @@ function runRender(file: string | undefined, rawFlags: Flags) {
   if (!file) throw new Error('Usage: the-lowdown render <answers-or-brief.json> [-o file] [-f format]');
   const loaded = loadConfig(rawFlags);
   const flags = { ...withConfig(rawFlags, loaded.config), out: rawFlags.out }; // render prints to stdout unless -o
-  const brief = loadBrief(file, loaded.questions);
-  emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags, loaded.sections)), flags.out);
+  const { brief } = readBriefFile(file, loaded);
+  const toFile = Boolean(flags.out && flags.out !== '-');
+  emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags, loaded.sections, toFile)), flags.out);
   if (flags.out && flags.out !== '-') {
     say(green(`✓ Wrote ${flags.out}`));
     if (wantsLink(flags)) runLink(flags.out, flags);
@@ -557,10 +590,95 @@ function runRender(file: string | undefined, rawFlags: Flags) {
 }
 
 function runLint(file: string | undefined, flags: Flags): number {
-  if (!file) throw new Error('Usage: the-lowdown lint <answers-or-brief.json>');
-  const issues = lintBrief(loadBrief(file, loadConfig(flags).questions));
+  if (!file) throw new Error('Usage: the-lowdown lint <brief>');
+  const { brief } = readBriefFile(file, loadConfig(flags));
+  const issues = lintBrief(brief);
   printIssues(issues);
+  printScore(brief, issues);
   return issues.some((i) => i.level === 'warn') ? 1 : 0;
+}
+
+function runDiff(a: string | undefined, b: string | undefined, flags: Flags): number {
+  if (!a || !b) throw new Error('Usage: the-lowdown diff <old brief> <new brief>');
+  const loaded = loadConfig(flags);
+  const changes = diffBriefs(readBriefFile(a, loaded).brief, readBriefFile(b, loaded).brief);
+  if (!changes.length) {
+    say(green('✓ No differences. Both briefs say the same thing.'));
+    return 0;
+  }
+  printChanges(changes);
+  say();
+  say(dim(`${changes.length} ${changes.length === 1 ? 'change' : 'changes'}`));
+  return 1;
+}
+
+async function runEdit(file: string | undefined, rawFlags: Flags) {
+  const loaded = loadConfig(rawFlags);
+  const flags = withConfig(rawFlags, loaded.config);
+  const source = file ?? 'BRIEF.md';
+  const original = readBriefFile(source, loaded);
+  const out = rawFlags.out ?? source;
+  const format = original.source === 'markdown' || rawFlags.out ? formatFor(out, rawFlags.format) : 'json';
+  if (flags['link-to']) parseLinkTargets(flags['link-to']);
+
+  // --only: keep everything else as it is, re-ask just these sections or ids.
+  const only = rawFlags.only?.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const reask = (q: Question) => !only || only.includes(q.id.toLowerCase()) || only.includes(q.section.toLowerCase());
+  if (only) {
+    const known = new Set(loaded.questions.flatMap((q) => [q.id.toLowerCase(), q.section.toLowerCase()]));
+    const bad = only.filter((x) => !known.has(x));
+    if (bad.length) throw new Error(`--only: no section or question called ${bad.join(', ')}.`);
+  }
+  const questions = loaded.questions.map((q): Question => {
+    if (!reask(q)) return original.answers[q.id] === undefined ? { ...q, when: () => false } : q;
+    return original.answers[q.id] !== undefined ? { ...q, default: original.answers[q.id] } : q;
+  });
+  const prefill = Object.fromEntries(Object.entries(original.answers).filter(([id]) => {
+    const q = loaded.questions.find((x) => x.id === id);
+    return !q || !reask(q);
+  }));
+  const toneGuidance = { ...loaded.toneGuidance, ...original.toneGuidance };
+  const session = new BriefSession({ questions, sections: loaded.sections, quick: flags.quick, answers: prefill, toneGuidance });
+  const reader = new LineReader();
+  const menus = reader.terminal && !flags.plain && typeof process.stdin.setRawMode === 'function';
+
+  try {
+    say(bold('the-lowdown edit') + dim(` · ${source}`));
+    say(dim('Enter keeps the current answer · "<" goes back · "?" explains · Ctrl+C quits'));
+    const done = await interview(session, reader, menus);
+    if (!done) throw new Error('Input ended before the required questions were answered.');
+
+    const brief = session.toBrief(original.brief.createdAt ? new Date(original.brief.createdAt) : undefined);
+    const changes = diffBriefs(original.brief, brief);
+    say();
+    say(bold('Changes'));
+    if (changes.length) printChanges(changes);
+    else say(dim('  None.'));
+    const issues = lintBrief(brief);
+    say();
+    say(bold('Review'));
+    printIssues(issues);
+    printScore(brief, issues);
+    say();
+    if (!changes.length && out === source) {
+      say(dim('Nothing changed, so nothing was written.'));
+      return;
+    }
+    if (!(await confirm(reader, `Write the brief to ${bold(out === '-' ? 'stdout' : out)}?`, Boolean(flags.yes)))) {
+      say(dim('Nothing written.'));
+      return;
+    }
+    const content = original.source === 'answers-json' && !rawFlags.out
+      ? JSON.stringify(session.answers, null, 2) + '\n'
+      : renderBrief(brief, format, renderOpts(flags, session.sections, out !== '-'));
+    emit(content, out);
+    if (out !== '-') {
+      say(green(`✓ Wrote ${out}`));
+      if (wantsLink(flags)) runLink(out, flags);
+    }
+  } finally {
+    reader.close();
+  }
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -580,6 +698,8 @@ async function main(argv: string[]): Promise<number> {
       'link-to': { type: 'string' },
       config: { type: 'string' },
       plain: { type: 'boolean' },
+      only: { type: 'string' },
+      'no-frontmatter': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -594,7 +714,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const [command = 'init', arg] = positionals;
+  const [command = 'init', arg, arg2] = positionals;
   const flags = values as Flags;
   switch (command) {
     case 'init':
@@ -605,6 +725,11 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case 'lint':
       return runLint(arg, flags);
+    case 'diff':
+      return runDiff(arg, arg2, flags);
+    case 'edit':
+      await runEdit(arg, flags);
+      return 0;
     case 'link': {
       const brief = arg ?? 'BRIEF.md';
       if (!existsSync(brief)) throw new Error(`${brief} not found. Run the-lowdown first, or pass the brief's path.`);

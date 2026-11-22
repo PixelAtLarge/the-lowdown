@@ -13,8 +13,18 @@ import {
   isBrief,
   lintBrief,
   parseInput,
+  diffBriefs,
+  isMarkdownBrief,
+  markdownToHtml,
+  parseMarkdownBrief,
   questionsToJSON,
+  readBrief,
   renderBrief,
+  scoreBrief,
+  scoreTips,
+  stripFrontmatter,
+  toHTML,
+  toMarkdown,
   type Answers,
   type Question,
 } from './index.js';
@@ -562,5 +572,241 @@ describe('react form: new question types', () => {
     }));
     assert.match(rankHtml, /Move “Fast” down/);
     assert.match(rankHtml, /Move “Clear” up/);
+  });
+});
+
+const rich: Answers = {
+  ...answers,
+  kind: 'dashboard',
+  fidelity: 'production',
+  userContext: 'On a phone, between school pickup and dinner',
+  secondaryUsers: ['Clinic front-desk staff'],
+  accessibility: ['WCAG 2.2 AA'],
+  goals: ['Book a session in under 60 seconds', 'No support tickets about booking'],
+  goalPriority: ['No support tickets about booking', 'Book a session in under 60 seconds'],
+  keyMetrics: ['Bookings per day'],
+  dataDensity: 4,
+  platforms: ['Desktop web', 'Mobile web'],
+  stack: 'Next.js + Tailwind',
+  mustInclude: ['Empty, loading and error states'],
+  mustAvoid: ['Modals on mobile'],
+  references: ['Calendly — the one-screen time picker'],
+};
+
+describe('reading a Markdown brief back', () => {
+  const brief = buildBrief(rich, { now: NOW });
+
+  it('round-trips the rendered Markdown without losing anything', () => {
+    const md = toMarkdown(brief, { frontmatter: true });
+    const back = readBrief(md);
+    assert.equal(back.source, 'markdown');
+    assert.equal(toMarkdown(back.brief, { frontmatter: true }), md);
+    assert.deepEqual(diffBriefs(brief, back.brief), []);
+  });
+
+  it('writes and reads frontmatter', () => {
+    const md = toMarkdown(brief, { frontmatter: true });
+    assert.match(md, /^---\nbrief: the-lowdown\nschema: 1\nproject: HealthHub onboarding\ncreated: 2026-11-05\n---\n/);
+    assert.equal(stripFrontmatter(md).data.created, '2026-11-05');
+    assert.ok(!/^---/.test(toMarkdown(brief)), 'frontmatter is off by default');
+    assert.ok(isMarkdownBrief(md) && isMarkdownBrief(toMarkdown(brief)));
+    assert.ok(!isMarkdownBrief('# Shopping list\n\n- eggs'));
+  });
+
+  it('picks up hand edits, including labels moved to another section', () => {
+    let md = toMarkdown(brief);
+    md = md.replace('**Primary user:** Busy parents booking care on their phone', '**Primary user:** Grandparents booking for the family');
+    md = md.replace('- Payments\n', '');
+    md = md.replace('## Constraints', '**Must avoid:**\n\n- Carousels\n\n## Constraints'); // under the wrong heading
+    const { answers: a } = parseMarkdownBrief(md);
+    assert.equal(a.primaryUsers, 'Grandparents booking for the family');
+    assert.deepEqual(a.nonGoals, ['Account settings']);
+    assert.ok(Array.isArray(a.mustAvoid));
+  });
+
+  it('reads tone words with custom guidance', () => {
+    const toneGuidance = { cozy: { label: 'Cozy', do: 'Warm neutrals', avoid: 'Stark white' } };
+    const b = buildBrief({ ...answers, tone: ['calm', 'cozy'] }, { now: NOW, toneGuidance });
+    const md = toMarkdown(b);
+    assert.match(md, /\*\*Cozy\.\*\* Do: Warm neutrals/);
+    const back = parseMarkdownBrief(md);
+    assert.deepEqual(back.answers.tone, ['calm', 'cozy']);
+    assert.match(back.toneGuidance.cozy?.avoid ?? '', /^Stark white\.?$/);
+  });
+
+  it('reads brief JSON and answers JSON too', () => {
+    assert.equal(readBrief(JSON.stringify(brief)).source, 'brief-json');
+    assert.equal(readBrief(JSON.stringify(rich)).source, 'answers-json');
+  });
+});
+
+describe('HTML export', () => {
+  it('converts the brief Markdown subset', () => {
+    const html = markdownToHtml('# Title\n\n> Quote\n\n**Bold:** `code` [link](https://x.dev)\n\n- a\n- [x] done\n\n1. one');
+    assert.match(html, /<h1>Title<\/h1>/);
+    assert.match(html, /<blockquote>/);
+    assert.match(html, /<strong>Bold:<\/strong> <code>code<\/code> <a href="https:\/\/x\.dev">link<\/a>/);
+    assert.match(html, /<ul>[\s\S]*<li>a<\/li>/);
+    assert.match(html, /<ol>[\s\S]*<li>one<\/li>/);
+  });
+
+  it('escapes HTML in answers', () => {
+    const html = toHTML(buildBrief({ ...answers, primaryUsers: '<script>alert(1)</script> parents' }, { now: NOW }));
+    assert.ok(!html.includes('<script>alert'));
+    assert.match(html, /&lt;script&gt;/);
+  });
+
+  it('is a standalone, print-ready page', () => {
+    const html = renderBrief(buildBrief(answers, { now: NOW }), 'html');
+    assert.match(html, /^<!DOCTYPE html>/i);
+    assert.match(html, /<title>[^<]*HealthHub onboarding/);
+    assert.match(html, /@media print|@page/);
+    assert.ok(!/^---/m.test(html.split('<body')[1] ?? ''), 'no frontmatter in the page');
+  });
+});
+
+describe('diffBriefs', () => {
+  it('reports scalar, list and reorder changes', () => {
+    const a = buildBrief(answers, { now: NOW });
+    const b = buildBrief({ ...answers, primaryUsers: 'Clinic staff', nonGoals: ['Account settings', 'Dark mode'], tone: ['warm', 'calm'] }, { now: NOW });
+    const changes = diffBriefs(a, b);
+    const by = (label: RegExp) => changes.find((c) => label.test(c.label));
+    assert.ok(by(/primary user/i));
+    const ng = by(/out of scope/i) as Extract<ReturnType<typeof diffBriefs>[number], { kind: 'list' }>;
+    assert.deepEqual(ng.added, ['Dark mode']);
+    assert.deepEqual(ng.removed, ['Payments']);
+    assert.deepEqual(diffBriefs(a, a), []);
+  });
+});
+
+describe('scoreBrief', () => {
+  it('scores a thin brief low and a full one high', () => {
+    const thin = scoreBrief(buildBrief({ name: 'X', summary: 'A thing.', primaryUsers: 'Everyone', goals: ['Feels intuitive'], primaryAction: 'Go' }, { now: NOW, strict: false }));
+    const full = scoreBrief(buildBrief({ ...rich, nonGoals: ['Payments'], tone: ['calm', 'warm'] }, { now: NOW }));
+    assert.ok(thin.score < 50, `thin ${thin.score}`);
+    assert.equal(thin.grade, 'Thin');
+    assert.ok(full.score >= 80, `full ${full.score}`);
+    assert.ok(full.score <= 100 && thin.score >= 0);
+    assert.equal(full.parts.reduce((n, p) => n + p.max, 0), 100);
+  });
+
+  it('gives tips that do not repeat lint messages', () => {
+    const b = buildBrief({ ...answers, primaryUsers: 'Everyone' }, { now: NOW });
+    const msgs = new Set(lintBrief(b).map((i) => i.message));
+    const tips = scoreTips(scoreBrief(b));
+    assert.ok(tips.length > 0 && tips.length <= 2);
+    assert.ok(tips.every((t) => !msgs.has(t)));
+  });
+});
+
+describe('new lint checks', () => {
+  const ids = (a: Answers) => lintBrief(buildBrief(a, { now: NOW, strict: false })).map((i) => `${i.level}:${i.field}:${i.message}`);
+
+  it('flags a platform the stack cannot build', () => {
+    assert.ok(ids({ ...answers, platforms: ['iOS'], stack: 'Next.js + Tailwind' }).some((m) => /iOS/.test(m) && /web/.test(m)));
+    assert.ok(ids({ ...answers, platforms: ['Desktop web'], stack: 'SwiftUI' }).some((m) => /^warn:constraints\.stack/.test(m)));
+    assert.ok(!ids({ ...answers, platforms: ['iOS'], stack: 'React Native' }).some((m) => /constraints\.stack/.test(m)));
+  });
+
+  it('asks for states at production fidelity', () => {
+    assert.ok(ids({ ...answers, fidelity: 'production' }).some((m) => /states that matter/.test(m)));
+    assert.ok(!ids({ ...answers, fidelity: 'production', mustInclude: ['Empty and error states'] }).some((m) => /states that matter/.test(m)));
+  });
+
+  it('flags too many success criteria', () => {
+    const goals = ['a 1', 'b 2', 'c 3', 'd 4', 'e 5', 'f 6'];
+    assert.ok(ids({ ...answers, goals }).some((m) => /^warn:goals/.test(m) && /6/.test(m)));
+    assert.ok(ids({ ...answers, goals, goalPriority: goals }).some((m) => /^info:goals/.test(m) && /6/.test(m)));
+  });
+
+  it('flags an item that is both a must and out of scope', () => {
+    assert.ok(ids({ ...answers, mustInclude: ['Payments'], nonGoals: ['Payments'] }).some((m) => /^warn:/.test(m) && /Payments/.test(m)));
+  });
+});
+
+describe('config: bring-your-own tone words', () => {
+  const tones = { cozy: { label: 'Cozy', hint: 'Like a reading nook', do: 'Warm neutrals, soft corners', avoid: 'Stark white, sharp edges' } };
+
+  it('validates them', () => {
+    assert.deepEqual(validateConfig({ tones }), []);
+    assert.ok(validateConfig({ tones: { bad: { label: 'Bad' } } as never }).some((e) => /tones\.bad/.test(e)));
+  });
+
+  it('adds the choice and its guidance to the brief', () => {
+    const { questions, toneGuidance } = applyConfig({ tones });
+    assert.ok(questions.find((q) => q.id === 'tone')!.choices!.some((c) => c.value === 'cozy' && c.label === 'Cozy'));
+    const s = new BriefSession({ questions, answers: { ...answers, tone: ['cozy'] }, toneGuidance });
+    const md = toMarkdown(s.toBrief(NOW));
+    assert.match(md, /\*\*Should feel:\*\* Cozy/);
+    assert.match(md, /\*\*Cozy\.\*\* Do: Warm neutrals, soft corners\. Avoid: Stark white, sharp edges/);
+    assert.match(renderBrief(s.toBrief(NOW), 'prompt'), /Warm neutrals, soft corners/);
+  });
+});
+
+describe('cli: edit, diff, lint, html', () => {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const run = (args: string[], cwd: string, input?: string) => spawnSync(process.execPath, [cli, ...args], { cwd, input, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1' } });
+  const setup = () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-edit-'));
+    writeFileSync(join(cwd, 'answers.json'), JSON.stringify(answers));
+    assert.equal(run(['render', 'answers.json', '-o', 'BRIEF.md'], cwd).status, 0);
+    return cwd;
+  };
+
+  it('renders Markdown files with frontmatter unless told not to', () => {
+    const cwd = setup();
+    assert.match(readFileSync(join(cwd, 'BRIEF.md'), 'utf8'), /^---\nbrief: the-lowdown/);
+    assert.equal(run(['render', 'answers.json', '-o', 'plain.md', '--no-frontmatter'], cwd).status, 0);
+    assert.match(readFileSync(join(cwd, 'plain.md'), 'utf8'), /^# Design brief/);
+  });
+
+  it('lints a Markdown brief and shows its strength', () => {
+    const cwd = setup();
+    const r = run(['lint', 'BRIEF.md'], cwd);
+    assert.match(r.stdout + r.stderr, /Brief strength: \d+\/100/);
+  });
+
+  it('diffs two briefs and exits 1 when they differ', () => {
+    const cwd = setup();
+    const md = readFileSync(join(cwd, 'BRIEF.md'), 'utf8');
+    writeFileSync(join(cwd, 'v2.md'), md.replace('Busy parents booking care on their phone', 'Clinic staff'));
+    let r = run(['diff', 'BRIEF.md', 'BRIEF.md'], cwd);
+    assert.equal(r.status, 0);
+    r = run(['diff', 'BRIEF.md', 'v2.md'], cwd);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout + r.stderr, /Primary user[\s\S]*- Busy parents[\s\S]*\+ Clinic staff/);
+    r = run(['diff', 'answers.json', 'BRIEF.md'], cwd);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+  });
+
+  it('edits only the sections asked for and keeps the rest', () => {
+    const cwd = setup();
+    const before = readFileSync(join(cwd, 'BRIEF.md'), 'utf8');
+    // goals section: goals (keep default with an empty line? no: replace), primary action (keep), non-goals (keep)
+    const r = run(['edit', '--only', 'goals', '-y', '--plain'], cwd, ['Book a session in under 45 seconds', '', '', '', ''].join('\n'));
+    assert.equal(r.status, 0, r.stderr);
+    const after = readFileSync(join(cwd, 'BRIEF.md'), 'utf8');
+    assert.match(after, /- Book a session in under 45 seconds/);
+    assert.match(after, /- Payments/);
+    assert.match(after, /\*\*Primary user:\*\* Busy parents booking care on their phone/);
+    assert.equal(after.split('\n').length, before.split('\n').length);
+    assert.match(after, /created: 2026-11-05|created: \d{4}-\d{2}-\d{2}/);
+    assert.ok(!/What is your situation|Their situation/.test(after.replace(before, '')));
+  });
+
+  it('rejects an unknown --only section', () => {
+    const cwd = setup();
+    const r = run(['edit', '--only', 'nope', '-y'], cwd, '');
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /no section or question called nope/);
+  });
+
+  it('exports HTML, with pdf as an alias', () => {
+    const cwd = setup();
+    assert.equal(run(['render', 'BRIEF.md', '-o', 'brief.html'], cwd).status, 0);
+    assert.match(readFileSync(join(cwd, 'brief.html'), 'utf8'), /^<!DOCTYPE html>/i);
+    const r = run(['render', 'BRIEF.md', '-f', 'pdf'], cwd);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /<!DOCTYPE html>/i);
   });
 });

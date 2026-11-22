@@ -14,6 +14,7 @@ export type {
   Reference,
   Section,
   SectionId,
+  ToneGuidance,
 } from './types.js';
 
 export {
@@ -38,11 +39,16 @@ export { applyConfig, validateConfig, type ConfigQuestion, type LowdownConfig, t
 export { BriefSession, type AnswerResult, type SessionOptions } from './session.js';
 export { buildBrief, isBrief, parseReference, type BuildOptions } from './brief.js';
 export { lintBrief } from './lint.js';
+export { scoreBrief, scoreTips, type BriefScore, type ScorePart } from './score.js';
+export { diffBriefs, type BriefChange } from './diff.js';
+export { readBrief, type ReadOptions, type ReadResult } from './read.js';
+export { isMarkdownBrief, markdownToHtml, parseMarkdownBrief, stripFrontmatter, type ParsedMarkdownBrief } from './markdown.js';
 export {
   AGENT_INSTRUCTIONS,
   CONTENT_GUIDANCE,
   FIDELITY_GUIDANCE,
   renderBrief,
+  toHTML,
   toJSON,
   toMarkdown,
   toPrompt,

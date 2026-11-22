@@ -66,6 +66,36 @@ export function lintBrief(brief: Brief): LintIssue[] {
     }
   }
 
+  if (brief.goals.successCriteria.length > 5) {
+    add(brief.goals.ranked ? 'info' : 'warn', 'goals.successCriteria',
+      `${brief.goals.successCriteria.length} goals is a lot to design for. Keep the three that matter most${brief.goals.ranked ? '' : ', or rank them'}.`);
+  }
+  const outOfScope = new Set(brief.goals.nonGoals.map((s) => s.toLowerCase()));
+  for (const item of brief.constraints.mustInclude) {
+    if (outOfScope.has(item.toLowerCase())) add('warn', 'constraints.mustInclude', `"${item}" is listed as both must-include and out of scope.`);
+  }
+
+  // Stack vs. platforms
+  const stack = (brief.constraints.stack ?? '').toLowerCase();
+  const platforms = brief.constraints.platforms.map((p) => p.toLowerCase());
+  const nativePlatform = platforms.some((p) => /\b(ios|android)\b/.test(p));
+  const nativeStack = /react native|expo|swift|kotlin|flutter|ionic|capacitor|maui|xamarin|tauri|electron/.test(stack);
+  const webOnlyStack = /\b(next(\.js)?|nuxt|vue|svelte|angular|astro|remix|html|tailwind|react)\b/.test(stack) && !nativeStack;
+  if (stack && nativePlatform && webOnlyStack) {
+    add('warn', 'constraints.stack', `The platforms include ${brief.constraints.platforms.filter((p) => /ios|android/i.test(p)).join(' and ')}, but "${brief.constraints.stack}" builds for the web. Add a native or cross-platform stack, or change the platforms.`);
+  }
+  if (stack && platforms.length && platforms.every((p) => /web|desktop|tablet/.test(p) && !/ios|android/.test(p)) && /\b(swift|swiftui|kotlin|jetpack compose)\b/.test(stack)) {
+    add('warn', 'constraints.stack', `"${brief.constraints.stack}" builds native apps, but the platforms are all web.`);
+  }
+
+  // Production needs its states named
+  if (brief.project.fidelity === 'production') {
+    const text = [brief.project.summary, brief.users.context, ...brief.goals.successCriteria, ...brief.constraints.mustInclude].join(' ').toLowerCase();
+    if (!/\b(empty|loading|error|offline|success) (state|states|screen)|\bstates?\b/.test(text)) {
+      add('info', 'constraints.mustInclude', 'Production fidelity: name the states that matter (empty, loading, error, offline) under "must include", or the agent will guess which to build.');
+    }
+  }
+
   // Project specifics
   const kind = (brief.project.kind ?? '').toLowerCase();
   const has = (id: string) => brief.specifics?.some((x) => x.id === id);

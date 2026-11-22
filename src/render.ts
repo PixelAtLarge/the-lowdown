@@ -1,7 +1,11 @@
 import { SECTIONS, TONE_GUIDANCE } from './questions.js';
 import { parseReference } from './brief.js';
+import { markdownToHtml } from './markdown.js';
 import { titleCase } from './session.js';
 import type { AnswerValue, Brief, OutputFormat, Section } from './types.js';
+
+/** End with a full stop so guidance written without one still reads as a sentence. */
+const sentence = (t: string) => (/[.!?]$/.test(t.trim()) ? t.trim() : `${t.trim()}.`);
 
 export const FIDELITY_GUIDANCE: Record<string, { label: string; guidance: string }> = {
   sketch: {
@@ -46,10 +50,15 @@ export interface RenderOptions {
   instructions?: boolean;
   /** Include the definition-of-done checklist. Default true. */
   checklist?: boolean;
+  /** Markdown only: start with a small YAML front matter block so tools can recognise the brief. Default false. */
+  frontmatter?: boolean;
 }
 
 const fmtValue = (v: AnswerValue): string =>
   typeof v === 'boolean' ? (v ? 'Yes' : 'No') : Array.isArray(v) ? v.join(', ') : String(v);
+
+/** Quote a YAML scalar only when it needs it. */
+const yamlString = (s: string) => (/^[\w .,()/&+-]+$/.test(s) && !/^[-?:,\[\]{}#&*!|>'"%@`]/.test(s) ? s : JSON.stringify(s));
 
 const fmtReference = (r: string, md: boolean) => {
   const { name, borrow } = parseReference(r);
@@ -58,7 +67,8 @@ const fmtReference = (r: string, md: boolean) => {
 
 const specific = (b: Brief, id: string) => b.specifics?.find((x) => x.id === id)?.value;
 
-const toneLabel = (t: string) => TONE_GUIDANCE[t.toLowerCase()]?.label ?? t;
+const guidanceFor = (b: Brief, t: string) => b.tone.guidance?.[t] ?? b.tone.guidance?.[t.toLowerCase()] ?? TONE_GUIDANCE[t.toLowerCase()];
+const toneLabelIn = (b: Brief) => (t: string) => guidanceFor(b, t)?.label ?? t;
 
 function definitionOfDone(b: Brief): string[] {
   const items = [...b.goals.successCriteria];
@@ -100,6 +110,15 @@ export function toMarkdown(b: Brief, opts: RenderOptions = {}): string {
     for (const [label, value] of extrasFor(b, section)) field(label, value);
   };
 
+  if (opts.frontmatter) {
+    line('---');
+    line('brief: the-lowdown');
+    line(`schema: ${b.schemaVersion}`);
+    line(`project: ${yamlString(b.project.name)}`);
+    line(`created: ${b.createdAt.slice(0, 10)}`);
+    line('---');
+    line();
+  }
   line(`# Design brief: ${b.project.name}`);
   line();
   if (b.project.summary) {
@@ -180,13 +199,13 @@ export function toMarkdown(b: Brief, opts: RenderOptions = {}): string {
     line('## Tone');
     line();
     if (b.tone.traits.length) {
-      line(`**Should feel:** ${b.tone.traits.map(toneLabel).join(', ')}`);
+      line(`**Should feel:** ${b.tone.traits.map(toneLabelIn(b)).join(', ')}`);
       line();
       for (const t of b.tone.traits) {
-        const g = TONE_GUIDANCE[t.toLowerCase()];
-        if (g) line(`- **${g.label}.** Do: ${g.do} Avoid: ${g.avoid}`);
+        const g = guidanceFor(b, t);
+        if (g) line(`- **${g.label}.** Do: ${sentence(g.do)} Avoid: ${sentence(g.avoid)}`);
       }
-      if (b.tone.traits.some((t) => TONE_GUIDANCE[t.toLowerCase()])) line();
+      if (b.tone.traits.some((t) => guidanceFor(b, t))) line();
     }
     block('References', b.tone.references.map((r) => fmtReference(r, true)));
     field('Must never feel like', b.tone.avoid);
@@ -264,8 +283,8 @@ export function toPrompt(b: Brief, opts: RenderOptions = {}): string {
   ]);
   tag('tone', [
     ...b.tone.traits.map((t) => {
-      const g = TONE_GUIDANCE[t.toLowerCase()];
-      return g ? `${g.label}. Do: ${g.do} Avoid: ${g.avoid}` : t;
+      const g = guidanceFor(b, t);
+      return g ? `${g.label}. Do: ${sentence(g.do)} Avoid: ${sentence(g.avoid)}` : t;
     }),
     b.tone.references.length > 0 && `References: ${b.tone.references.map((r) => fmtReference(r, false)).join('; ')}`,
     b.tone.avoid && `Must never feel like: ${b.tone.avoid}`,
@@ -292,5 +311,57 @@ export function renderBrief(b: Brief, format: OutputFormat = 'markdown', opts: R
       return toPrompt(b, opts);
     case 'json':
       return toJSON(b);
+    case 'html':
+      return toHTML(b, opts);
   }
+}
+
+// ── HTML one-pager (print to PDF, open in Google Docs, paste into Notion) ──
+
+const HTML_STYLE = `
+:root { --ink:#22272B; --muted:#5A6268; --line:#CFD9DF; --accent:#1E4D36; --soft:#EFF8FF; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink); font: 15px/1.55 Manrope, "Segoe UI", system-ui, -apple-system, sans-serif; }
+main { max-width: 760px; margin: 40px auto; padding: 0 28px; }
+h1 { font: 400 32px/1.15 "Young Serif", Georgia, "Times New Roman", serif; color: var(--accent); margin: 0 0 12px; }
+h2 { font: 400 20px/1.2 "Young Serif", Georgia, serif; color: var(--accent); margin: 26px 0 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+p { margin: 0 0 8px; }
+blockquote { margin: 0 0 12px; padding: 8px 14px; border-left: 4px solid var(--accent); background: var(--soft); color: var(--ink); font-size: 16px; }
+ul, ol { margin: 4px 0 10px; padding-left: 22px; }
+li { margin: 2px 0; }
+li.task { list-style: none; margin-left: -22px; }
+li.task::before { content: "\\2610"; margin-right: 8px; color: var(--muted); }
+strong { font-weight: 700; }
+code { font: 13px ui-monospace, Menlo, monospace; background: #F1F4F6; border-radius: 4px; padding: 1px 5px; }
+footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+@page { size: auto; margin: 14mm; }
+@media print {
+  body { font-size: 11pt; }
+  main { margin: 0; max-width: none; padding: 0; }
+  h1 { font-size: 22pt; }
+  h2 { font-size: 13pt; margin-top: 14px; padding-top: 8px; break-after: avoid; }
+  li, blockquote { break-inside: avoid; }
+}`;
+
+/** A standalone, print-friendly HTML page of the brief. */
+export function toHTML(b: Brief, opts: RenderOptions = {}): string {
+  const md = toMarkdown(b, { ...opts, frontmatter: false });
+  const title = `Design brief: ${b.project.name}`.replace(/[<&>"]/g, (c) => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;' })[c]!);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="the-lowdown">
+<title>${title}</title>
+<style>${HTML_STYLE}</style>
+</head>
+<body>
+<main>
+${markdownToHtml(md)}
+<footer>Written with the-lowdown · ${b.createdAt.slice(0, 10)}</footer>
+</main>
+</body>
+</html>
+`;
 }

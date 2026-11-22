@@ -76,13 +76,15 @@ Ranked goals come out as a numbered list ("when two conflict, the higher one win
 
 ```
 the-lowdown [init] [options]     Run the guided Q&A (default)
-the-lowdown render <file>        Render an answers or brief JSON file
-the-lowdown lint <file>          Check a brief for weak spots (exit 1 on warnings)
+the-lowdown edit [brief]         Re-run the Q&A on an existing brief, current answers prefilled
+the-lowdown diff <old> <new>     Show what changed between two briefs (exit 1 if they differ)
+the-lowdown render <file>        Render a BRIEF.md, brief JSON or answers JSON file
+the-lowdown lint <file>          Check a brief and score its strength (exit 1 on warnings)
 the-lowdown questions            Print the question schema as JSON (for agents)
 the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a brief
 
 -o, --out <file>          Output file. Default: BRIEF.md for init, stdout for render. "-" = stdout
--f, --format <fmt>        markdown | prompt | json  (default: from --out extension)
+-f, --format <fmt>        markdown | prompt | json | html  (default: from --out extension; pdf = html)
 -q, --quick               Essential questions only
     --answers <file>      Prefill from JSON; only missing questions are asked
     --config <file>       Team config (default: .lowdownrc.json, .lowdownrc or lowdown.config.json)
@@ -90,6 +92,8 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
     --save-answers <file> Also save raw answers (edit and re-render later)
     --no-instructions     Leave out the "How to use this brief" section
     --no-checklist        Leave out the definition-of-done checklist
+    --no-frontmatter      Leave out the small YAML header in Markdown files
+    --only <list>         edit: re-ask just these sections or question ids (e.g. goals,tone)
     --link                After writing, point your agent instruction files at the brief
     --link-to <list>      claude, agents, cursor, copilot (default: whichever exist, else AGENTS.md)
 -y, --yes                 Don't ask before writing or overwriting
@@ -101,6 +105,21 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
 | `agents` | `AGENTS.md` |
 | `cursor` | `.cursor/rules/the-lowdown.mdc` (always-applied rule) |
 | `copilot` | `.github/copilot-instructions.md` |
+
+### Edit, diff and score a brief
+
+`BRIEF.md` is the source of truth. Edit it by hand, and every command reads it back: `render`, `lint`, `diff` and `edit` take a `BRIEF.md`, a brief JSON or an answers JSON. Markdown files get a short YAML header (`brief`, `schema`, `project`, `created`) so tools can spot them; the body is what's read.
+
+```sh
+the-lowdown edit                      # walk through BRIEF.md again; Enter keeps each answer
+the-lowdown edit --only goals,tone    # re-ask just those sections, keep the rest as is
+the-lowdown diff v1.md BRIEF.md       # what changed, field by field
+the-lowdown lint BRIEF.md             # warnings, tips and a strength score
+```
+
+`edit` shows the changes and the review before it writes, and keeps the brief's original date. `diff` exits 1 when the briefs differ, so it works as a CI check.
+
+The **strength score** (0–100, Thin / Okay / Strong / Excellent) appears in the review step and in `lint`. It counts a specific primary user, measurable and ranked goals, scope, a primary action, a clear tone, fidelity, constraints, accessibility, context and project specifics, minus points for each warning, then names the two changes that would add the most.
 
 ### Team config
 
@@ -129,6 +148,12 @@ Put a `.lowdownrc.json` in your project (or pass `--config`) to give everyone th
 - `answers` are fixed and never asked; `defaults` are pre-selected and accepted with Enter.
 - `questions` adds your own. Place one with `"after": "<question id>"`, ask it in quick mode with `"quick": true`, and show it only sometimes with a `condition`: `{ "kind": "dashboard" }`, `{ "kind": ["web-app", "dashboard"] }`, `{ "hasBrand": true }`, or `{ "stack": "*" }` for "answered at all".
 - `overrides` rewords built-in questions (`prompt`, `help`, `example`, `choiceLabels`, `choiceHints`, `minLabel`, `maxLabel`, `required`, `quick`, `default`), and `sections` renames sections. Together they can **translate the interview**, for example `{ "fidelity": { "prompt": "¿Qué tan terminado?", "choiceLabels": { "sketch": "Boceto" } } }`. The command-line chrome itself stays in English for now.
+- `tones` adds your own tone words, with the do/avoid guidance the agent should follow:
+
+  ```json
+  "tones": { "cozy": { "label": "Cozy", "hint": "Like a reading nook", "do": "Warm neutrals, soft corners", "avoid": "Stark white, sharp edges" } }
+  ```
+
 - `the-lowdown questions` prints the questions with your config applied, so an agent running the interview sees your team's version.
 
 ### Output formats
@@ -136,6 +161,7 @@ Put a `.lowdownrc.json` in your project (or pass `--config`) to give everyone th
 - **`markdown`** (default): a readable `BRIEF.md` for repos, docs and humans.
 - **`prompt`**: compact XML-tagged text (`<design_brief>`, `<users>`, `<tone>`…) to paste into a system prompt or agent config.
 - **`json`**: the typed `Brief` object, for tooling.
+- **`html`**: a standalone, print-ready page. Open it and print for a **PDF**, or upload it to Drive and open it with **Google Docs**. For **Notion**, import the Markdown file.
 
 ### Let the agent run the interview
 
@@ -144,7 +170,7 @@ Put a `.lowdownrc.json` in your project (or pass `--config`) to give everyone th
 ## API
 
 ```ts
-import { createBrief, buildBrief, lintBrief, renderBrief, shareUrl, answersFromHash } from '@pixelatlarge/the-lowdown';
+import { createBrief, buildBrief, lintBrief, scoreBrief, renderBrief, readBrief, diffBriefs, shareUrl, answersFromHash } from '@pixelatlarge/the-lowdown';
 
 // Answers in, brief out
 const md = createBrief({
@@ -161,7 +187,12 @@ const md = createBrief({
 // Or step by step
 const brief = buildBrief(answers);           // typed Brief, throws on invalid answers
 const issues = lintBrief(brief);              // [{ level: 'warn' | 'info', field, message }]
-const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json'
+const { score, grade } = scoreBrief(brief);   // 0–100, 'Thin' | 'Okay' | 'Strong' | 'Excellent'
+const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json' | 'html'
+
+// Read a (possibly hand-edited) BRIEF.md, brief JSON or answers JSON back in
+const { brief: edited, answers: recovered } = readBrief(markdownText);
+const changes = diffBriefs(brief, edited);    // [{ label, kind: 'value' | 'list', … }]
 
 // Shareable links: answers live in the URL hash, so no server is involved
 const url = shareUrl('https://example.com/brief', answers); // …#a=v1.eyJu…
@@ -189,7 +220,7 @@ import '@pixelatlarge/the-lowdown/react/styles.css'; // optional default theme
 />
 ```
 
-It asks one question at a time, shows the brief check before creating the brief, then offers Markdown, prompt and JSON tabs with copy and download. Props include `questions`, `quick`, `initialAnswers`, `startAtResult`, `onChange`, `onComplete`, `formats`, `renderOptions` and `resultActions`. Restyle it with the `--ld-*` CSS variables (`--ld-accent`, `--ld-font`, `--ld-radius`…), or skip the stylesheet and style the `ld-` classes yourself. `useBriefSession()` is exported too, for building a fully custom UI.
+It asks one question at a time, shows the brief check and strength score before creating the brief, then offers Markdown, prompt and JSON tabs (add `'html'` to `formats` for a fourth) with copy, download, and print or save as PDF. Props include `questions`, `quick`, `initialAnswers`, `startAtResult`, `toneGuidance`, `showScore`, `printButton`, `onChange`, `onComplete`, `formats`, `renderOptions` and `resultActions`. Restyle it with the `--ld-*` CSS variables (`--ld-accent`, `--ld-font`, `--ld-radius`…), or skip the stylesheet and style the `ld-` classes yourself. `useBriefSession()` is exported too, for building a fully custom UI.
 
 ### Headless session (build your own UI)
 
@@ -229,13 +260,13 @@ const questions: Question[] = [
 const session = new BriefSession({ questions });
 ```
 
-Or start from a config object with `applyConfig(config)`, which returns `{ questions, sections, answers }` for a session and works in the browser too.
+Or start from a config object with `applyConfig(config)`, which returns `{ questions, sections, answers, toneGuidance }` for a session and works in the browser too.
 
 Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`, `scale` (a whole number between `min` and `max`, with optional `minLabel` / `maxLabel`) and `rank` (put items in priority order; `rankFrom: '<list question id>'` ranks another answer's items, otherwise the `choices`). Options include `required`, `quick`, `default`, `choices`, `allowOther`, `max`, `condition`, `when` and `validate`.
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `toHTML`, `lintBrief`, `scoreBrief`, `scoreTips`, `readBrief`, `diffBriefs`, `parseMarkdownBrief`, `isMarkdownBrief`, `stripFrontmatter`, `markdownToHtml`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
 
 ## Example output
 

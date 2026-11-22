@@ -1,5 +1,5 @@
 import { DEFAULT_QUESTIONS, SECTIONS } from './questions.js';
-import type { AnswerValue, Answers, Choice, Condition, OutputFormat, Question, QuestionType, Section } from './types.js';
+import type { AnswerValue, Answers, Choice, Condition, OutputFormat, Question, QuestionType, Section, ToneGuidance } from './types.js';
 
 /** Reword, translate or retune a built-in question. */
 export interface QuestionOverride {
@@ -50,6 +50,11 @@ export interface LowdownConfig {
   overrides?: Record<string, QuestionOverride>;
   /** Rename sections or add titles for new ones: { "tone": "Look and feel" } or { "brand": { "title": "Brand", "intro": "…" } }. */
   sections?: Record<string, string | { title?: string; intro?: string }>;
+  /**
+   * Your own tone words, or new meanings for built-in ones, keyed by a short id:
+   * { "cozy": { "label": "Cozy", "hint": "soft and homey", "do": "…", "avoid": "…" } }.
+   */
+  tones?: Record<string, ToneGuidance>;
 }
 
 const TYPES: QuestionType[] = ['text', 'longtext', 'list', 'select', 'multiselect', 'confirm', 'scale', 'rank'];
@@ -86,7 +91,10 @@ export function validateConfig(config: unknown, base: Question[] = DEFAULT_QUEST
     if (!q) errors.push(`skip: no question has the id "${id}".`);
     else if (q.required && c.answers?.[id] === undefined) errors.push(`skip: "${id}" is required; give it a fixed value in "answers" instead.`);
   }
-  if (c.format && !['markdown', 'prompt', 'json'].includes(c.format)) errors.push('format must be markdown, prompt or json.');
+  if (c.format && !['markdown', 'prompt', 'json', 'html'].includes(c.format)) errors.push('format must be markdown, prompt, json or html.');
+  for (const [key, t] of Object.entries(c.tones ?? {})) {
+    if (!t || typeof t !== 'object' || !t.label || !t.do || !t.avoid) errors.push(`tones.${key} needs a label, do and avoid.`);
+  }
   return errors;
 }
 
@@ -98,7 +106,7 @@ export function validateConfig(config: unknown, base: Question[] = DEFAULT_QUEST
 export function applyConfig(
   config: LowdownConfig,
   base: { questions?: Question[]; sections?: Section[] } = {},
-): { questions: Question[]; sections: Section[]; answers: Answers } {
+): { questions: Question[]; sections: Section[]; answers: Answers; toneGuidance: Record<string, ToneGuidance> } {
   const skip = new Set(config.skip ?? []);
   let questions: Question[] = (base.questions ?? DEFAULT_QUESTIONS)
     .filter((q) => !skip.has(q.id))
@@ -126,6 +134,22 @@ export function applyConfig(
       };
     });
 
+  // Custom tone words become choices on the tone question.
+  const tones = Object.entries(config.tones ?? {});
+  if (tones.length) {
+    questions = questions.map((q) => {
+      if (q.id !== 'tone') return q;
+      const choices = [...(q.choices ?? [])];
+      for (const [value, t] of tones) {
+        const i = choices.findIndex((c) => c.value === value);
+        const choice = { value, label: t.label, hint: t.hint ?? t.do.split(/[,.]/)[0] };
+        if (i >= 0) choices[i] = choice;
+        else choices.push(choice);
+      }
+      return { ...q, choices };
+    });
+  }
+
   for (const added of config.questions ?? []) {
     const { after, ...q } = added;
     const question: Question = { ...q, ...(config.defaults?.[q.id] !== undefined && { default: config.defaults[q.id] }) };
@@ -148,7 +172,7 @@ export function applyConfig(
     }
   }
 
-  return { questions, sections, answers: { ...(config.answers ?? {}) } };
+  return { questions, sections, answers: { ...(config.answers ?? {}) }, toneGuidance: { ...(config.tones ?? {}) } };
 }
 
 export type { Condition };

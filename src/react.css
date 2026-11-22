@@ -74,6 +74,15 @@
 .ld-btn-quiet:hover { color: var(--ld-ink); border-color: transparent; text-decoration: underline; }
 
 .ld-ok { margin: 8px 0 0; padding: 12px 16px; border-radius: var(--ld-radius); background: var(--ld-ok-bg); color: var(--ld-ok); font-weight: 600; }
+.ld-score { margin: 8px 0 12px; padding: 12px 16px; border-radius: var(--ld-radius); border: 1px solid var(--ld-line); }
+.ld-score-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
+.ld-score-value { font-variant-numeric: tabular-nums; }
+.ld-meter { height: 8px; margin-top: 8px; border-radius: 999px; background: var(--ld-soft); overflow: hidden; }
+.ld-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--ld-accent); transition: width .3s ease; }
+.ld-score[data-grade="thin"] .ld-meter-fill { background: var(--ld-warn); }
+@media (prefers-reduced-motion: reduce) { .ld-meter-fill { transition: none; } }
+.ld-next { margin: 8px 0 0; padding-left: 1.2em; font-size: .95em; }
+.ld-next li + li { margin-top: 4px; }
 .ld-issues { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
 .ld-issue { padding: 12px 14px; border-radius: var(--ld-radius); background: var(--ld-soft); font-size: 15px; line-height: 1.45; }
 .ld-badge { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .04em; border-radius: 99px; padding: 2px 9px; margin-right: 6px; background: var(--ld-surface); color: var(--ld-muted); }

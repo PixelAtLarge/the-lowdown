@@ -1,20 +1,23 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import { isEmpty, rankItems, scaleRange } from './answers.js';
 import { lintBrief } from './lint.js';
-import { renderBrief, type RenderOptions } from './render.js';
+import { renderBrief, toHTML, type RenderOptions } from './render.js';
+import { scoreBrief, scoreTips } from './score.js';
 import { BriefSession } from './session.js';
-import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question } from './types.js';
+import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question, ToneGuidance } from './types.js';
 
 export interface UseBriefSessionOptions {
   questions?: Question[];
   quick?: boolean;
   initialAnswers?: Answers;
+  /** Do/avoid guidance for your own tone words, keyed by choice value. */
+  toneGuidance?: Record<string, ToneGuidance>;
 }
 
 /** React state around a headless BriefSession. Re-renders on every step. */
 export function useBriefSession(opts: UseBriefSessionOptions = {}) {
   const ref = useRef<BriefSession>();
-  if (!ref.current) ref.current = new BriefSession({ questions: opts.questions, quick: opts.quick, answers: opts.initialAnswers });
+  if (!ref.current) ref.current = new BriefSession({ questions: opts.questions, quick: opts.quick, answers: opts.initialAnswers, toneGuidance: opts.toneGuidance });
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
   const session = ref.current;
@@ -30,14 +33,14 @@ export function useBriefSession(opts: UseBriefSessionOptions = {}) {
     skip: () => { const r = session.skip(); bump(); return r; },
     back: () => { const q = session.back(); bump(); return q; },
     reset: (answers?: Answers) => {
-      ref.current = new BriefSession({ questions: opts.questions, quick: opts.quick, answers });
+      ref.current = new BriefSession({ questions: opts.questions, quick: opts.quick, answers, toneGuidance: opts.toneGuidance });
       bump();
     },
   };
 }
 
-const FILE_NAMES: Record<OutputFormat, string> = { markdown: 'BRIEF.md', prompt: 'brief-prompt.txt', json: 'brief.json' };
-const FORMAT_LABELS: Record<OutputFormat, string> = { markdown: 'Markdown', prompt: 'Prompt', json: 'JSON' };
+const FILE_NAMES: Record<OutputFormat, string> = { markdown: 'BRIEF.md', prompt: 'brief-prompt.txt', json: 'brief.json', html: 'brief.html' };
+const FORMAT_LABELS: Record<OutputFormat, string> = { markdown: 'Markdown', prompt: 'Prompt', json: 'JSON', html: 'HTML' };
 
 export interface ResultContext {
   brief: Brief;
@@ -53,6 +56,12 @@ export interface LowdownFormProps {
   quick?: boolean;
   /** Pre-filled answers; those questions are skipped. */
   initialAnswers?: Answers;
+  /** Do/avoid guidance for your own tone words, keyed by choice value. */
+  toneGuidance?: Record<string, ToneGuidance>;
+  /** Show the brief strength score in the review step. Default true. */
+  showScore?: boolean;
+  /** Show a "Print or save as PDF" button on the result screen. Default true. */
+  printButton?: boolean;
   /** Open on the finished brief when initialAnswers already cover the required questions (e.g. a shared link). */
   startAtResult?: boolean;
   /** Called after every answer. */
@@ -76,7 +85,7 @@ type Stage = 'questions' | 'review' | 'result';
  */
 export function LowdownForm(props: LowdownFormProps) {
   const { formats = ['markdown', 'prompt', 'json'], renderOptions, onChange, onComplete, resultActions } = props;
-  const s = useBriefSession({ questions: props.questions, quick: props.quick, initialAnswers: props.initialAnswers });
+  const s = useBriefSession({ questions: props.questions, quick: props.quick, initialAnswers: props.initialAnswers, toneGuidance: props.toneGuidance });
   const canStartAtResult = props.startAtResult && s.session.missingRequired().length === 0;
   const [stage, setStage] = useState<Stage>(canStartAtResult ? 'result' : 'questions');
   const [format, setFormat] = useState<OutputFormat>(formats[0] ?? 'markdown');
@@ -100,6 +109,7 @@ export function LowdownForm(props: LowdownFormProps) {
     [stage, JSON.stringify(s.answers)],
   );
   const issues: LintIssue[] = useMemo(() => (brief ? lintBrief(brief) : []), [brief]);
+  const score = useMemo(() => (brief ? scoreBrief(brief, issues) : undefined), [brief, issues]);
 
   const submit = (value: AnswerValue | undefined) => {
     const r = value === undefined || isEmpty(value) ? s.skip() : s.answer(value);
@@ -148,6 +158,9 @@ export function LowdownForm(props: LowdownFormProps) {
           <button type="button" className="ld-btn" onClick={() => download(FILE_NAMES[format], output)}>
             Download {FILE_NAMES[format]}
           </button>
+          {props.printButton !== false && (
+            <button type="button" className="ld-btn" onClick={() => printHTML(toHTML(brief, renderOptions))}>Print or save as PDF</button>
+          )}
           {resultActions?.({ brief, answers: s.session.answers, format, output })}
           <button type="button" className="ld-btn ld-btn-quiet" onClick={() => setStage('review')}>Back to review</button>
           <button type="button" className="ld-btn ld-btn-quiet" onClick={startOver}>Start over</button>
@@ -160,6 +173,22 @@ export function LowdownForm(props: LowdownFormProps) {
     return (
       <section className={cls} data-stage="review">
         <h3 className="ld-title" tabIndex={-1} ref={headingRef}>Review</h3>
+        {score && props.showScore !== false && (
+          <div className="ld-score" data-grade={score.grade.toLowerCase()}>
+            <div className="ld-score-head">
+              <span className="ld-score-label">Brief strength</span>
+              <span className="ld-score-value">{score.score}/100 · {score.grade}</span>
+            </div>
+            <div className="ld-meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={score.score} aria-valuetext={`${score.score} out of 100, ${score.grade}`} aria-label="Brief strength">
+              <span className="ld-meter-fill" style={{ width: `${score.score}%` }} />
+            </div>
+            {scoreTips(score).length > 0 && (
+              <ul className="ld-next" aria-label="To raise the score">
+                {scoreTips(score).map((t) => <li key={t}>{t}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
         {issues.length === 0 ? (
           <p className="ld-ok">No issues. This brief gives an agent plenty to work with.</p>
         ) : (
@@ -379,8 +408,10 @@ export function CopyButton({ text, label = 'Copy', className = 'ld-btn' }: { tex
   );
 }
 
+const MIME: Record<string, string> = { json: 'application/json', html: 'text/html', md: 'text/markdown' };
+
 function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: name.endsWith('.json') ? 'application/json' : 'text/plain' }));
+  const url = URL.createObjectURL(new Blob([text], { type: MIME[name.split('.').pop() ?? ''] ?? 'text/plain' }));
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -388,4 +419,18 @@ function download(name: string, text: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Print a standalone HTML page from a hidden frame, so popup blockers stay out of it. */
+function printHTML(html: string) {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+  frame.onload = () => {
+    frame.contentWindow?.focus();
+    frame.contentWindow?.print();
+    setTimeout(() => frame.remove(), 1000);
+  };
+  frame.srcdoc = html;
+  document.body.appendChild(frame);
 }

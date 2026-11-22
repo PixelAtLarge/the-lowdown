@@ -69,6 +69,14 @@ export interface Section {
   intro?: string;
 }
 
+/** What a tone word means in practice. */
+export interface ToneGuidance {
+  label: string;
+  hint?: string;
+  do: string;
+  avoid: string;
+}
+
 /** A product or brand that captures the feel, and what to take from it. */
 export interface Reference {
   name: string;
@@ -117,7 +125,10 @@ export interface Brief {
     mustAvoid: string[];
   };
   tone: {
+    /** Tone word keys, e.g. "calm". */
     traits: string[];
+    /** Do/avoid guidance for tone words that aren't built in (or that a team redefined). */
+    guidance?: Record<string, ToneGuidance>;
     /** "Product — what to borrow" strings; see parseReference(). */
     references: string[];
     avoid?: string;
@@ -136,4 +147,4 @@ export interface LintIssue {
   message: string;
 }
 
-export type OutputFormat = 'markdown' | 'json' | 'prompt';
+export type OutputFormat = 'markdown' | 'json' | 'prompt' | 'html';

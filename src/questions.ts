@@ -325,6 +325,13 @@ export const DEFAULT_QUESTIONS: Question[] = [
   },
 ];
 
+const labelsToValues = (id: string): Record<string, string> =>
+  Object.fromEntries((DEFAULT_QUESTIONS.find((q) => q.id === id)?.choices ?? []).map((c) => [c.label.toLowerCase(), c.value]));
+
+/** Lower-cased choice label → value, for reading Markdown briefs back in. */
+export const FIDELITY_LABELS = labelsToValues('fidelity');
+export const CONTENT_CHOICE_LABELS = labelsToValues('content');
+
 /** Known built-in ids, used to separate custom answers into `brief.extra`. */
 export const BUILT_IN_IDS = new Set(DEFAULT_QUESTIONS.map((q) => q.id));
 

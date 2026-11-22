@@ -2,7 +2,7 @@
 
 Versioning rule: any breaking change to the brief format (`brief.json`, `schemaVersion`) is a major version.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-22)
 
 - **Try it in the browser:** https://pixelatlarge.github.io/the-lowdown/
 - **React component:** `LowdownForm` and `useBriefSession` from `@pixelatlarge/the-lowdown/react`, with an optional default theme at `@pixelatlarge/the-lowdown/react/styles.css`. React 18+ is an optional peer dependency.

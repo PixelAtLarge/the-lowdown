@@ -108,6 +108,24 @@ export class BriefSession {
     return { ok: true };
   }
 
+  /**
+   * Change the answer to any question without moving through the interview,
+   * e.g. after a follow-up or an accepted rewrite. An empty value clears it.
+   */
+  set(id: string, value: AnswerValue | undefined): AnswerResult {
+    const q = this.find(id);
+    if (!q) return { ok: false, error: `No question called ${id}.` };
+    const normalized = value === undefined ? undefined : normalizeAnswer(q, value, this._answers);
+    const valid = validateAnswer(q, normalized, this._answers);
+    if (valid !== true) return { ok: false, error: valid };
+    if (normalized === undefined || isEmpty(normalized)) delete this._answers[id];
+    else {
+      this._answers[id] = normalized;
+      this.skipped.delete(id);
+    }
+    return { ok: true };
+  }
+
   /** Answer the current question from raw typed text (accepts choice numbers). */
   answerText(raw: string): AnswerResult {
     const q = this.current();

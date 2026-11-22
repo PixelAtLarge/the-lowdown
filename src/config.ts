@@ -55,6 +55,13 @@ export interface LowdownConfig {
    * { "cozy": { "label": "Cozy", "hint": "soft and homey", "do": "…", "avoid": "…" } }.
    */
   tones?: Record<string, ToneGuidance>;
+  /**
+   * Optional AI help (drafting from --from, rewrite suggestions, tailored follow-ups).
+   * Uses ANTHROPIC_API_KEY, or a Claude Code login. `false` turns it off.
+   */
+  ai?: false | { model?: string; models?: { draft?: string; suggest?: string; followUp?: string }; budget?: number };
+  /** Ask one more question when an answer is vague. Default: on in a terminal. */
+  followUps?: boolean;
 }
 
 const TYPES: QuestionType[] = ['text', 'longtext', 'list', 'select', 'multiselect', 'confirm', 'scale', 'rank'];
@@ -92,6 +99,14 @@ export function validateConfig(config: unknown, base: Question[] = DEFAULT_QUEST
     else if (q.required && c.answers?.[id] === undefined) errors.push(`skip: "${id}" is required; give it a fixed value in "answers" instead.`);
   }
   if (c.format && !['markdown', 'prompt', 'json', 'html'].includes(c.format)) errors.push('format must be markdown, prompt, json or html.');
+  if (c.ai !== undefined && c.ai !== false) {
+    if (typeof c.ai !== 'object' || Array.isArray(c.ai)) errors.push('ai must be false or an object.');
+    else {
+      if (c.ai.budget !== undefined && !(typeof c.ai.budget === 'number' && c.ai.budget >= 0)) errors.push('ai.budget must be a number of US dollars, e.g. 0.25.');
+      for (const k of Object.keys(c.ai.models ?? {})) if (!['draft', 'suggest', 'followUp'].includes(k)) errors.push(`ai.models.${k}: use draft, suggest or followUp.`);
+    }
+  }
+  if (c.followUps !== undefined && typeof c.followUps !== 'boolean') errors.push('followUps must be true or false.');
   for (const [key, t] of Object.entries(c.tones ?? {})) {
     if (!t || typeof t !== 'object' || !t.label || !t.do || !t.avoid) errors.push(`tones.${key} needs a label, do and avoid.`);
   }

@@ -37,6 +37,10 @@
       "types": "./dist/link.d.ts",
       "import": "./dist/link.js"
     },
+    "./ai": {
+      "types": "./dist/ai.d.ts",
+      "import": "./dist/ai.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"

@@ -38,7 +38,26 @@ export {
 export { applyConfig, validateConfig, type ConfigQuestion, type LowdownConfig, type QuestionOverride } from './config.js';
 export { BriefSession, type AnswerResult, type SessionOptions } from './session.js';
 export { buildBrief, isBrief, parseReference, type BuildOptions } from './brief.js';
-export { lintBrief } from './lint.js';
+export { lintBrief, questionForField } from './lint.js';
+export { followUpFor, type FollowUp } from './followups.js';
+export { draftFromText, htmlToText } from './draft.js';
+export {
+  BudgetError,
+  coerceAnswer,
+  createAssistant,
+  costOf,
+  estimateCost,
+  DEFAULT_MODELS,
+  PRICES,
+  type Assistant,
+  type AssistantOptions,
+  type AssistStage,
+  type Complete,
+  type CompleteRequest,
+  type CompleteResult,
+  type Draft,
+  type Rewrite,
+} from './assist.js';
 export { scoreBrief, scoreTips, type BriefScore, type ScorePart } from './score.js';
 export { diffBriefs, type BriefChange } from './diff.js';
 export { readBrief, type ReadOptions, type ReadResult } from './read.js';

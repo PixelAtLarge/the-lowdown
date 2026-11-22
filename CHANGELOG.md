@@ -23,6 +23,10 @@ Versioning rule: any breaking change to the brief format (`brief.json`, `schemaV
 - **Brief strength score** (`scoreBrief`, `scoreTips`) in the review step, in `lint` and in the React form.
 - **Your own tone words:** `tones` in the config adds choices with do/avoid guidance; the React form takes `toneGuidance`.
 - More brief checks: a platform the stack can't build (iOS with a web stack, or the reverse), production fidelity without the states to build, more than five success criteria, and an item that is both a must and out of scope.
+- **AI help, all optional:** `--from <file|url>` drafts answers from a PRD, README or web page for you to confirm; `--suggest` (and the review, in a terminal) proposes sharper rewrites for flagged answers; vague answers get a follow-up question. Without AI, `--from` and follow-ups still work offline.
+- AI uses `ANTHROPIC_API_KEY`, or falls back to a Claude Code login, with Sonnet for drafting, Haiku for the rest, and a per-run budget cap (`--budget`, default $0.25). No new dependencies. `createAssistant` works in the browser with your own model route; Node providers live at `@pixelatlarge/the-lowdown/ai`.
+- The React form asks follow-ups and, given an `assistant`, offers suggested rewrites in the review.
+- `BriefSession.set(id, value)` changes any answer without moving through the interview.
 - Brief JSON stays `schemaVersion: 1`: new fields are optional, and briefs saved earlier still render.
 
 ## 0.1.0

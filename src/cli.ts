@@ -4,12 +4,16 @@ import { extname } from 'node:path';
 import { createInterface, emitKeypressEvents, type Interface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { rankItems, scaleRange } from './answers.js';
+import { BudgetError, coerceAnswer, createAssistant, type Assistant, type Rewrite } from './assist.js';
+import { autoComplete, detectAi, readSource, type AiRoute } from './ai.js';
+import { draftFromText } from './draft.js';
+import { followUpFor } from './followups.js';
 import { diffBriefs, type BriefChange } from './diff.js';
 import { readBrief, type ReadResult } from './read.js';
 import { scoreBrief, scoreTips } from './score.js';
 import { applyConfig, validateConfig, type LowdownConfig } from './config.js';
 import { linkBrief, parseLinkTargets, type LinkResult } from './link.js';
-import { lintBrief } from './lint.js';
+import { lintBrief, questionForField } from './lint.js';
 import { createMenu, menuReducer, renderMenu, type MenuItem, type MenuKey, type MenuResult, type MenuState } from './menu.js';
 import { renderBrief, type RenderOptions } from './render.js';
 import { questionsToJSON } from './serialize.js';
@@ -191,12 +195,22 @@ ${bold('Options')}
       --no-checklist        Leave out the definition-of-done checklist
       --no-frontmatter      Leave out the small front matter block at the top of BRIEF.md
       --only <list>         edit: only re-ask these sections or question ids (e.g. tone,goals)
+      --from <file|url>     Draft answers from a PRD, README or web page; you confirm each one
+      --suggest             Suggest sharper answers for what the review flags (lint: print them)
+      --no-follow-ups       Don't ask a follow-up when an answer is vague (on in a terminal)
+      --no-ai               Don't use AI, even when it's available
+      --model <id>          Claude model for every AI step
+      --budget <usd>        AI spend cap for this run (default 0.25)
       --link                After writing, point your agent instruction files at the brief
       --link-to <list>      Which files to link: claude, agents, cursor, copilot (comma-separated).
                             Default: whichever already exist, or AGENTS.md if none do
   -y, --yes                 Don't ask before writing or overwriting
   -h, --help                Show this help
   -v, --version             Show version
+
+${bold('AI (optional)')}
+  --from, --suggest and tailored follow-ups use Claude when ANTHROPIC_API_KEY is set or
+  Claude Code is installed and logged in. Without it, --from and follow-ups still work offline.
 
 ${bold('While answering')}
   Enter   skip an optional question (or accept the default)
@@ -355,8 +369,9 @@ async function askList(reader: LineReader, first: string): Promise<string | null
   return items.join('\n');
 }
 
-async function interview(session: BriefSession, reader: LineReader, menus: boolean): Promise<boolean> {
+async function interview(session: BriefSession, reader: LineReader, menus: boolean, opts: InterviewOptions = {}): Promise<boolean> {
   let lastSection = '';
+  const asked = new Set<string>();
   for (;;) {
     const q = session.current();
     if (!q) return true;
@@ -394,7 +409,10 @@ async function interview(session: BriefSession, reader: LineReader, menus: boole
         outcome = session.answerText(value);
       }
       if (!outcome.ok) say(red(`  ${outcome.error}`));
-      else say(`${cyan('›')} ${showChosen(q, session.answers[q.id])}`);
+      else {
+        say(`${cyan('›')} ${showChosen(q, session.answers[q.id])}`);
+        await maybeFollowUp(q, session, reader, opts, asked);
+      }
       continue;
     }
 
@@ -427,6 +445,7 @@ async function interview(session: BriefSession, reader: LineReader, menus: boole
     if (cmd === '') {
       const result = draft !== undefined ? session.answer(draft) : session.skip();
       if (!result.ok) say(red(`  ${result.error}`));
+      else await maybeFollowUp(q, session, reader, opts, asked);
       continue;
     }
     if (q.type === 'list') {
@@ -434,7 +453,169 @@ async function interview(session: BriefSession, reader: LineReader, menus: boole
     }
     const result = session.answerText(raw);
     if (!result.ok) say(red(`  ${result.error}`));
+    else await maybeFollowUp(q, session, reader, opts, asked);
   }
+}
+
+// ── AI (optional) ────────────────────────────────────────────
+
+/** The AI side of one run. It switches itself off after the first failure, so the interview never stalls. */
+class AiHelper {
+  assistant?: Assistant;
+  private warned = false;
+  constructor(readonly route: AiRoute | undefined, assistant: Assistant | undefined) {
+    this.assistant = assistant;
+  }
+
+  get on(): boolean {
+    return Boolean(this.assistant);
+  }
+
+  /** Run an AI step; on any error, say so once and carry on without AI. */
+  async try<T>(step: (a: Assistant) => Promise<T>): Promise<T | undefined> {
+    if (!this.assistant) return undefined;
+    try {
+      return await step(this.assistant);
+    } catch (e) {
+      if (!this.warned) {
+        const msg = (e as Error).message.split('\n')[0];
+        say(yellow(`  ${e instanceof BudgetError ? msg : `AI unavailable: ${msg}`} Carrying on without it.`));
+        this.warned = true;
+      }
+      if (!(e instanceof BudgetError)) this.assistant = undefined;
+      return undefined;
+    }
+  }
+
+  summary() {
+    const a = this.assistant;
+    if (!a || a.spent === 0) return;
+    const how = this.route === 'claude-code' ? 'via Claude Code' : 'via the API';
+    say(dim(`AI: ${a.spent < 0.01 ? 'under $0.01' : `about $${a.spent.toFixed(2)}`} of the $${a.budget.toFixed(2)} budget ${how}`));
+  }
+}
+
+function makeAi(flags: Flags, config: LowdownConfig, questions: Question[]): AiHelper {
+  if (flags['no-ai'] || config.ai === false || process.env.THE_LOWDOWN_NO_AI) return new AiHelper(undefined, undefined);
+  const route = detectAi();
+  const complete = route ? autoComplete() : undefined;
+  if (!complete) return new AiHelper(undefined, undefined);
+  const cfg = config.ai || {};
+  const budget = flags.budget !== undefined ? Number(flags.budget) : cfg.budget;
+  if (budget !== undefined && !(budget >= 0)) throw new Error('--budget must be a number of US dollars, e.g. 0.50.');
+  const model = flags.model ?? process.env.THE_LOWDOWN_MODEL ?? cfg.model;
+  return new AiHelper(route, createAssistant({ complete, questions, budget, model, models: flags.model ? undefined : cfg.models }));
+}
+
+interface InterviewOptions {
+  followUps?: boolean;
+  ai?: AiHelper;
+}
+
+/** Ask one more question when an answer is too vague, then fold the reply in. */
+async function maybeFollowUp(q: Question, session: BriefSession, reader: LineReader, opts: InterviewOptions, asked: Set<string>) {
+  if (!opts.followUps || asked.has(q.id)) return;
+  const value = session.answers[q.id];
+  const fu = followUpFor(q, value, session.answers);
+  if (!fu || value === undefined) return;
+  asked.add(q.id);
+  const prompt = (await opts.ai?.try((a) => a.followUpQuestion(fu, value, session.answers))) ?? fu.prompt;
+  say(`${yellow('  ↳')} ${bold(prompt)}`);
+  if (fu.example) say(dim(`    e.g. ${fu.example}`));
+  say(dim('    Enter keeps your answer.'));
+  const reply = await reader.ask(cyan('  › '));
+  if (reply === null || !reply.trim()) return;
+  const merged = (await opts.ai?.try((a) => a.mergeFollowUp(fu, value, prompt, reply, session.answers))) ?? fu.merge(value, reply);
+  const r = session.set(q.id, merged);
+  if (r.ok) say(`${cyan('  ›')} ${showChosen(q, session.answers[q.id])}`);
+  else say(red(`  ${r.error}`));
+}
+
+function showRewrite(r: Rewrite, q: Question | undefined) {
+  say();
+  say(bold(r.label));
+  say(dim(`  ${r.issue}`));
+  if (r.current !== undefined) say(red(`  - ${q ? showChosen(q, r.current) : showValue(r.current)}`));
+  say(green(`  + ${q ? showChosen(q, r.suggestion) : showValue(r.suggestion)}`));
+  if (r.why) say(dim(`  ${r.why}`));
+}
+
+/**
+ * After the review: offer sharper answers for flagged items, one at a time.
+ * Returns true when any were accepted. Asked only in a terminal, or with --suggest.
+ */
+async function offerRewrites(session: BriefSession, reader: LineReader, ai: AiHelper, issues: LintIssue[], force: boolean): Promise<boolean> {
+  const fixable = issues.filter((i) => questionForField(i.field) && session.find(questionForField(i.field)!));
+  if (!fixable.length) return false;
+  if (!ai.on) {
+    if (force) say(dim('  Suggested rewrites need AI: set ANTHROPIC_API_KEY, or install Claude Code and log in.'));
+    return false;
+  }
+  if (!force) {
+    if (!reader.terminal) return false;
+    const a = await reader.ask(`Suggest sharper answers for ${fixable.length === 1 ? 'the flagged item' : `the ${fixable.length} flagged items`}? ${dim('(y/N)')} `);
+    if (!a || !/^y/i.test(a.trim())) return false;
+  }
+  say(dim('  Asking Claude…'));
+  const rewrites = (await ai.try((a) => a.suggestRewrites(session.toBrief(), session.answers, fixable))) ?? [];
+  if (!rewrites.length) {
+    say(dim('  No rewrites to suggest.'));
+    return false;
+  }
+  let changed = false;
+  for (const r of rewrites) {
+    const q = session.find(r.questionId);
+    showRewrite(r, q);
+    const a = await reader.ask(`  Use it? ${dim('(y/N)')} `);
+    if (a && /^y/i.test(a.trim())) {
+      const res = session.set(r.questionId, r.suggestion);
+      if (res.ok) changed = true;
+      else say(red(`  ${res.error}`));
+    }
+  }
+  return changed;
+}
+
+/** Review step shared by init and edit: issues, score, optional rewrites, then the review again if anything changed. */
+async function review(session: BriefSession, reader: LineReader, ai: AiHelper, suggest: boolean, now?: Date): Promise<Brief> {
+  let brief = session.toBrief(now);
+  let issues = lintBrief(brief);
+  say();
+  say(bold('Review'));
+  printIssues(issues);
+  printScore(brief, issues);
+  if (await offerRewrites(session, reader, ai, issues, suggest)) {
+    brief = session.toBrief(now);
+    issues = lintBrief(brief);
+    say();
+    say(bold('Review'));
+    printIssues(issues);
+    printScore(brief, issues);
+  }
+  return brief;
+}
+
+/** --from: draft answers from a document. AI when available, a simple offline read otherwise. */
+async function draftFrom(source: string, questions: Question[], ai: AiHelper): Promise<Answers> {
+  const text = await readSource(source);
+  say(dim(`Reading ${source}…`));
+  const viaAi = await ai.try((a) => a.draftAnswers(text, { source, questions }));
+  let answers: Answers = {};
+  if (viaAi) {
+    answers = viaAi.answers;
+  } else {
+    for (const [id, v] of Object.entries(draftFromText(text))) {
+      const q = questions.find((x) => x.id === id);
+      const c = q ? coerceAnswer(q, v, answers) : undefined;
+      if (c !== undefined) answers[id] = c;
+    }
+  }
+  const n = Object.keys(answers).length;
+  say(n
+    ? green(`✓ Drafted ${n} ${n === 1 ? 'answer' : 'answers'} from ${source}${viaAi ? '' : ' (without AI)'}. Enter accepts each one; type to change it.`)
+    : yellow(`  Couldn't find answers in ${source}${viaAi ? '' : ' without AI'}. Carrying on with the usual questions.`));
+  for (const note of viaAi?.notes ?? []) say(dim(`  • ${note}`));
+  return answers;
 }
 
 async function confirm(reader: LineReader, question: string, yes: boolean): Promise<boolean> {
@@ -460,6 +641,13 @@ interface Flags {
   plain?: boolean;
   only?: string;
   'no-frontmatter'?: boolean;
+  from?: string;
+  suggest?: boolean;
+  'no-follow-ups'?: boolean;
+  'follow-ups'?: boolean;
+  'no-ai'?: boolean;
+  model?: string;
+  budget?: string;
 }
 
 const CONFIG_FILES = ['.lowdownrc.json', '.lowdownrc', 'lowdown.config.json'];
@@ -525,27 +713,32 @@ async function runInit(rawFlags: Flags) {
   const format = formatFor(out, flags.format);
   if (flags['link-to']) parseLinkTargets(flags['link-to']); // fail before the interview, not after
   const prefill = { ...loaded.answers, ...(flags.answers ? (readJSON(flags.answers) as Answers) : {}) };
-  const session = new BriefSession({ questions: loaded.questions, sections: loaded.sections, quick: flags.quick, answers: prefill, toneGuidance: loaded.toneGuidance });
   const reader = new LineReader();
   const menus = reader.terminal && !flags.plain && typeof process.stdin.setRawMode === 'function';
+  const ai = makeAi(rawFlags, loaded.config, loaded.questions);
+  const followUps = !rawFlags['no-follow-ups'] && (Boolean(rawFlags['follow-ups']) || (loaded.config.followUps ?? reader.terminal));
 
   try {
     say(bold('the-lowdown') + dim(' · a few minutes now saves a lot of agent rework'));
     say(dim('Enter skips optional questions · "<" goes back · "?" explains · Ctrl+C quits'));
     if (loaded.file) say(dim(`Using ${loaded.file}`));
 
-    const done = await interview(session, reader, menus);
+    // --from: drafted answers become defaults, so each one is shown and confirmed, never slipped in.
+    let questions = loaded.questions;
+    if (rawFlags.from) {
+      const drafted = await draftFrom(rawFlags.from, loaded.questions, ai);
+      questions = loaded.questions.map((q) => (drafted[q.id] !== undefined && prefill[q.id] === undefined ? { ...q, default: drafted[q.id] } : q));
+    }
+    const session = new BriefSession({ questions, sections: loaded.sections, quick: flags.quick, answers: prefill, toneGuidance: loaded.toneGuidance });
+
+    const done = await interview(session, reader, menus, { followUps, ai });
     if (!done) {
       const missing = session.missingRequired().map((q) => q.id).join(', ');
       throw new Error(`Input ended before the required questions were answered (${missing}).`);
     }
 
-    const brief = session.toBrief();
-    const issues = lintBrief(brief);
-    say();
-    say(bold('Review'));
-    printIssues(issues);
-    printScore(brief, issues);
+    const brief = await review(session, reader, ai, Boolean(rawFlags.suggest));
+    ai.summary();
     say();
 
     const target = out === '-' ? 'stdout' : out;
@@ -589,13 +782,30 @@ function runRender(file: string | undefined, rawFlags: Flags) {
   }
 }
 
-function runLint(file: string | undefined, flags: Flags): number {
+async function runLint(file: string | undefined, flags: Flags): Promise<number> {
   if (!file) throw new Error('Usage: the-lowdown lint <brief>');
-  const { brief } = readBriefFile(file, loadConfig(flags));
+  const loaded = loadConfig(flags);
+  const { brief, answers } = readBriefFile(file, loaded);
   const issues = lintBrief(brief);
   printIssues(issues);
   printScore(brief, issues);
+  if (flags.suggest) await printSuggestions(brief, answers, issues, makeAi(flags, loaded.config, loaded.questions), loaded.questions);
   return issues.some((i) => i.level === 'warn') ? 1 : 0;
+}
+
+async function printSuggestions(brief: Brief, answers: Answers, issues: LintIssue[], ai: AiHelper, questions: Question[]) {
+  say();
+  if (!ai.on) {
+    say(dim('Suggested rewrites need AI: set ANTHROPIC_API_KEY, or install Claude Code and log in.'));
+    return;
+  }
+  say(bold('Suggested rewrites'));
+  const rewrites = (await ai.try((a) => a.suggestRewrites(brief, answers, issues))) ?? [];
+  if (!rewrites.length) say(dim('  Nothing to suggest.'));
+  for (const r of rewrites) showRewrite(r, questions.find((q) => q.id === r.questionId));
+  say();
+  say(dim('Apply them with "the-lowdown edit --suggest".'));
+  ai.summary();
 }
 
 function runDiff(a: string | undefined, b: string | undefined, flags: Flags): number {
@@ -641,24 +851,24 @@ async function runEdit(file: string | undefined, rawFlags: Flags) {
   const session = new BriefSession({ questions, sections: loaded.sections, quick: flags.quick, answers: prefill, toneGuidance });
   const reader = new LineReader();
   const menus = reader.terminal && !flags.plain && typeof process.stdin.setRawMode === 'function';
+  const ai = makeAi(rawFlags, loaded.config, loaded.questions);
+  const followUps = !rawFlags['no-follow-ups'] && (Boolean(rawFlags['follow-ups']) || (loaded.config.followUps ?? reader.terminal));
 
   try {
     say(bold('the-lowdown edit') + dim(` · ${source}`));
     say(dim('Enter keeps the current answer · "<" goes back · "?" explains · Ctrl+C quits'));
-    const done = await interview(session, reader, menus);
+    const done = await interview(session, reader, menus, { followUps, ai });
     if (!done) throw new Error('Input ended before the required questions were answered.');
 
-    const brief = session.toBrief(original.brief.createdAt ? new Date(original.brief.createdAt) : undefined);
+    const created = original.brief.createdAt ? new Date(original.brief.createdAt) : undefined;
+    const reviewed = await review(session, reader, ai, Boolean(rawFlags.suggest), created);
+    const brief = reviewed;
     const changes = diffBriefs(original.brief, brief);
     say();
     say(bold('Changes'));
     if (changes.length) printChanges(changes);
     else say(dim('  None.'));
-    const issues = lintBrief(brief);
-    say();
-    say(bold('Review'));
-    printIssues(issues);
-    printScore(brief, issues);
+    ai.summary();
     say();
     if (!changes.length && out === source) {
       say(dim('Nothing changed, so nothing was written.'));
@@ -700,6 +910,13 @@ async function main(argv: string[]): Promise<number> {
       plain: { type: 'boolean' },
       only: { type: 'string' },
       'no-frontmatter': { type: 'boolean' },
+      from: { type: 'string' },
+      suggest: { type: 'boolean' },
+      'follow-ups': { type: 'boolean' },
+      'no-follow-ups': { type: 'boolean' },
+      'no-ai': { type: 'boolean' },
+      model: { type: 'string' },
+      budget: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -724,7 +941,7 @@ async function main(argv: string[]): Promise<number> {
       runRender(arg, flags);
       return 0;
     case 'lint':
-      return runLint(arg, flags);
+      return await runLint(arg, flags);
     case 'diff':
       return runDiff(arg, arg2, flags);
     case 'edit':

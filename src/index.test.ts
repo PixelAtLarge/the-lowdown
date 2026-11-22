@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +14,15 @@ import {
   isBrief,
   lintBrief,
   parseInput,
+  BudgetError,
+  createAssistant,
   diffBriefs,
+  draftFromText,
+  followUpFor,
+  htmlToText,
   isMarkdownBrief,
+  questionForField,
+  type Complete,
   markdownToHtml,
   parseMarkdownBrief,
   questionsToJSON,
@@ -29,6 +37,7 @@ import {
   type Question,
 } from './index.js';
 import { linkBrief, linkInstruction } from './link.js';
+import { anthropicApi, claudeCode, readSource } from './ai.js';
 import { answersFromHash, decodeAnswers, encodeAnswers, shareUrl } from './share.js';
 
 const NOW = new Date('2026-11-05T12:00:00Z');
@@ -809,4 +818,338 @@ describe('cli: edit, diff, lint, html', () => {
     assert.equal(r.status, 0);
     assert.match(r.stdout, /<!DOCTYPE html>/i);
   });
+});
+
+// ── AI assistance ────────────────────────────────────────────
+
+const PRD = `# PRD: Coach Finder
+
+[![build](https://x/badge.svg)](https://x)
+
+Coach Finder helps new HealthHub members find a coach who fits their schedule and book a first session from their phone.
+
+## Who it's for
+
+Busy parents who joined in the last month and haven't booked yet.
+
+## Goals
+
+- Book a first session in under 2 minutes
+- Fewer than 5% of bookings need support
+
+## Non-goals
+
+- Payments
+- Coach reviews
+
+## Tech stack
+
+- Next.js
+- Tailwind
+`;
+
+describe('follow-ups', () => {
+  it('asks one more question for vague answers only', () => {
+    assert.ok(followUpFor(q('primaryUsers'), 'Everyone'));
+    assert.ok(followUpFor(q('primaryUsers'), 'Parents'));
+    assert.equal(followUpFor(q('primaryUsers'), 'Busy parents booking care on their phone'), undefined);
+    assert.ok(followUpFor(q('summary'), 'An app'));
+    assert.ok(followUpFor(q('primaryAction'), 'Book, cancel or reschedule'));
+    assert.equal(followUpFor(q('primaryAction'), 'Book a session'), undefined);
+    assert.equal(followUpFor(q('tone'), ['calm']), undefined);
+  });
+
+  it('merges the reply into the answer', () => {
+    const fu = followUpFor(q('goals'), ['Books in under a minute', 'Feels intuitive'])!;
+    assert.equal(fu.item, 'Feels intuitive');
+    assert.deepEqual(fu.merge(['Books in under a minute', 'Feels intuitive'], 'Books without help'), ['Books in under a minute', 'Books without help']);
+    assert.deepEqual(fu.merge(['Feels intuitive'], '  '), ['Feels intuitive'], 'an empty reply keeps the answer');
+    const users = followUpFor(q('primaryUsers'), 'Everyone')!;
+    assert.equal(users.merge('Everyone', 'Clinic front-desk staff'), 'Clinic front-desk staff');
+  });
+
+  it('session.set changes any answer without moving on', () => {
+    const s = new BriefSession({ answers: { ...answers } });
+    const before = s.current()?.id;
+    assert.deepEqual(s.set('primaryUsers', 'Clinic staff'), { ok: true });
+    assert.equal(s.answers.primaryUsers, 'Clinic staff');
+    assert.equal(s.current()?.id, before);
+    assert.equal(s.set('fidelity', 'nonsense').ok, false);
+    assert.equal(s.set('nope', 'x').ok, false);
+    s.set('nonGoals', undefined);
+    assert.ok(!('nonGoals' in s.answers));
+  });
+
+  it('maps brief-check fields to questions', () => {
+    assert.equal(questionForField('users.primary'), 'primaryUsers');
+    assert.equal(questionForField('goals.successCriteria'), 'goals');
+    assert.equal(questionForField('specifics.keyMetrics'), 'keyMetrics');
+    assert.equal(questionForField('constraints'), undefined);
+  });
+});
+
+describe('drafting from a document without AI', () => {
+  it('reads a PRD', () => {
+    const a = draftFromText(PRD);
+    assert.equal(a.name, 'Coach Finder');
+    assert.match(String(a.summary), /^Coach Finder helps new HealthHub members/);
+    assert.deepEqual(a.goals, ['Book a first session in under 2 minutes', 'Fewer than 5% of bookings need support']);
+    assert.deepEqual(a.nonGoals, ['Payments', 'Coach reviews']);
+    assert.match(String(a.primaryUsers), /^Busy parents/);
+    assert.equal(a.stack, 'Next.js, Tailwind');
+  });
+
+  it('reads an HTML page', () => {
+    const html = '<html><head><style>p{}</style><script>evil()</script></head><body><h1>Coach Finder</h1><p>Helps new members find a coach &amp; book a session from their phone.</p><h2>Out of scope</h2><ul><li>Payments</li></ul></body></html>';
+    const text = htmlToText(html);
+    assert.ok(!/evil|<p>/.test(text));
+    assert.match(text, /^# Coach Finder/);
+    const a = draftFromText(html);
+    assert.equal(a.name, 'Coach Finder');
+    assert.match(String(a.summary), /coach & book/);
+    assert.deepEqual(a.nonGoals, ['Payments']);
+  });
+
+  it('finds nothing in a document with no structure', () => {
+    assert.deepEqual(draftFromText('hello'), {});
+  });
+});
+
+/** A fake model: replies by matching the system prompt, and records every request. */
+function fakeModel(replies: Array<[RegExp, unknown]>, cost = 0.001) {
+  const calls: Parameters<Complete>[0][] = [];
+  const complete: Complete = async (req) => {
+    calls.push(req);
+    const hit = replies.find(([re]) => re.test(req.system));
+    return { text: hit ? (typeof hit[1] === 'string' ? hit[1] : '```json\n' + JSON.stringify(hit[1]) + '\n```') : '{}', costUsd: cost };
+  };
+  return { complete, calls };
+}
+
+describe('assistant', () => {
+  it('drafts answers and drops anything that does not fit a question', async () => {
+    const m = fakeModel([[/pre-fill/, { answers: { name: 'Coach Finder', kind: 'mobile-app', fidelity: 'nonsense', goals: 'Book in under 2 minutes', ghost: 'x' }, notes: ['Platforms not stated.'] }]]);
+    const a = createAssistant({ complete: m.complete });
+    const d = await a.draftAnswers(PRD, { source: 'PRD.md' });
+    assert.deepEqual(d.answers, { name: 'Coach Finder', kind: 'mobile-app', goals: ['Book in under 2 minutes'] });
+    assert.deepEqual(d.notes, ['Platforms not stated.']);
+    assert.equal(m.calls[0]!.model, 'claude-sonnet-5-5');
+    assert.match(m.calls[0]!.user, /<document source="PRD.md">/);
+    assert.ok(Math.abs(a.spent - 0.001) < 1e-9);
+  });
+
+  it('suggests rewrites only for flagged answers, and only real changes', async () => {
+    const m = fakeModel([[/tighten a design brief/, { rewrites: [
+      { id: 'primaryUsers', value: 'Busy parents booking care on their phone', why: 'One person, one situation.' },
+      { id: 'goals', value: ['Feels intuitive'] }, // unchanged: dropped
+      { id: 'tone', value: ['calm'] }, // not flagged: dropped
+      { id: 'kind', value: 'nonsense' },
+    ] }]]);
+    const a = createAssistant({ complete: m.complete });
+    const weak = { ...answers, primaryUsers: 'Everyone', goals: ['Feels intuitive'] };
+    const rewrites = await a.suggestRewrites(buildBrief(weak, { now: NOW }), weak);
+    assert.deepEqual(rewrites.map((r) => r.questionId), ['primaryUsers']);
+    assert.equal(rewrites[0]!.current, 'Everyone');
+    assert.match(rewrites[0]!.issue, /too broad/);
+    assert.equal(m.calls[0]!.model, 'claude-haiku-5-5');
+  });
+
+  it('tailors follow-ups and merges replies', async () => {
+    const m = fakeModel([[/ONE short follow-up/, { question: 'Which parents, and when do they book?' }], [/Combine/, { value: 'Working parents booking in the evening' }]]);
+    const a = createAssistant({ complete: m.complete, model: 'claude-opus-5-5' });
+    const fu = followUpFor(q('primaryUsers'), 'Parents')!;
+    assert.equal(await a.followUpQuestion(fu, 'Parents', answers), 'Which parents, and when do they book?');
+    assert.equal(await a.mergeFollowUp(fu, 'Parents', 'Which parents?', 'working ones, evenings', answers), 'Working parents booking in the evening');
+    assert.ok(m.calls.every((c) => c.model === 'claude-opus-5-5'));
+  });
+
+  it('retries once when the reply is not JSON', async () => {
+    let n = 0;
+    const a = createAssistant({ complete: async () => ({ text: n++ ? '{"question":"Who exactly?"}' : 'Sure! Here you go.', costUsd: 0 }) });
+    assert.equal(await a.followUpQuestion(followUpFor(q('primaryUsers'), 'Everyone')!, 'Everyone', answers), 'Who exactly?');
+    assert.equal(n, 2);
+  });
+
+  it('stops at the budget before calling the model', async () => {
+    const m = fakeModel([[/pre-fill/, { answers: {} }]]);
+    const a = createAssistant({ complete: m.complete, budget: 0.001 });
+    await assert.rejects(a.draftAnswers(PRD), BudgetError);
+    assert.equal(m.calls.length, 0);
+    const b = createAssistant({ complete: m.complete, budget: 1 });
+    await b.draftAnswers(PRD);
+    assert.ok(m.calls[0]!.maxCostUsd! <= 1);
+  });
+});
+
+describe('AI providers', () => {
+  it('calls the Messages API with fetch and prices the reply', async () => {
+    let sent: { url: string; init: RequestInit } | undefined;
+    const fake = (async (url: string, init: RequestInit) => {
+      sent = { url, init };
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'hi' }], usage: { input_tokens: 1_000_000, output_tokens: 0 } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await anthropicApi({ apiKey: 'k\n', baseUrl: 'http://x/', fetch: fake })({ system: 's', user: 'u', model: 'claude-haiku-5-5', maxTokens: 10 });
+    assert.equal(r.text, 'hi');
+    assert.equal(r.costUsd, 0.1);
+    assert.equal(sent!.url, 'http://x/v1/messages');
+    assert.equal((sent!.init.headers as Record<string, string>)['x-api-key'], 'k\n');
+    assert.deepEqual(JSON.parse(String(sent!.init.body)).messages, [{ role: 'user', content: 'u' }]);
+  });
+
+  it('explains a rejected key', async () => {
+    const fake = (async () => new Response(JSON.stringify({ error: { message: 'invalid x-api-key' } }), { status: 401 })) as unknown as typeof fetch;
+    await assert.rejects(anthropicApi({ apiKey: 'bad', fetch: fake })({ system: 's', user: 'u', model: 'm', maxTokens: 1 }), /ANTHROPIC_API_KEY.*invalid x-api-key/s);
+  });
+
+  it('reuses a Claude Code login as a plain completion', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'the-lowdown-claude-'));
+    const bin = join(dir, 'claude');
+    writeFileSync(bin, `#!/usr/bin/env node
+let input = ''; process.stdin.on('data', (d) => (input += d)); process.stdin.on('end', () => {
+  const args = process.argv.slice(2);
+  require('fs').writeFileSync(${JSON.stringify(join(dir, 'args.json'))}, JSON.stringify({ args, input }));
+  const out = input === 'logged out' ? { type: 'result', subtype: 'success', is_error: true, result: 'Not logged in · Please run /login' } : { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.02 };
+  console.log(JSON.stringify(out));
+});
+`);
+    chmodSync(bin, 0o755);
+    writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}');
+    const complete = claudeCode({ bin });
+    const r = await complete({ system: 'sys', user: 'hello', model: 'claude-haiku-5-5', maxTokens: 10, maxCostUsd: 0.2 });
+    assert.deepEqual(r, { text: 'ok', costUsd: 0.02 });
+    const { args, input } = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
+    assert.equal(input, 'hello');
+    for (const [flag, value] of [['--model', 'claude-haiku-5-5'], ['--system-prompt', 'sys'], ['--tools', ''], ['--setting-sources', ''], ['--max-budget-usd', '0.20'], ['--output-format', 'json']]) {
+      assert.equal(args[args.indexOf(flag) + 1], value, flag);
+    }
+    assert.ok(args.includes('--no-session-persistence') && args.includes('--strict-mcp-config') && args.includes('-p'));
+    await assert.rejects(complete({ system: 's', user: 'logged out', model: 'm', maxTokens: 1 }), /run \/login/);
+    await assert.rejects(claudeCode({ bin: join(dir, 'missing') })({ system: 's', user: 'u', model: 'm', maxTokens: 1 }), /isn't installed/);
+  });
+
+  it('reads a source file or URL', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'the-lowdown-src-'));
+    writeFileSync(join(dir, 'p.html'), '<h1>Title</h1><p>Body text</p>');
+    assert.match(await readSource(join(dir, 'p.html')), /^# Title\n\nBody text/);
+    await assert.rejects(readSource(join(dir, 'nope.md')), /not found/);
+    await assert.rejects(readSource(join(dir, 'x.pdf')), /not found|text or Markdown/);
+    const fake = (async () => new Response('<!doctype html><h1>Web</h1>', { status: 200, headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
+    assert.match(await readSource('https://example.com/prd', fake), /^# Web/);
+  });
+
+  it('validates the ai config', () => {
+    assert.deepEqual(validateConfig({ ai: { budget: 0.5, models: { draft: 'claude-opus-5-5' } }, followUps: false }), []);
+    assert.deepEqual(validateConfig({ ai: false }), []);
+    const errs = validateConfig({ ai: { budget: -1, models: { other: 'x' } } as never, followUps: 'yes' as never });
+    assert.equal(errs.length, 3);
+  });
+});
+
+describe('cli: AI assistance', () => {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  /** spawn without blocking, so the mock API in this process can answer. */
+  const run = (args: string[], cwd: string, input: string, env: Record<string, string | undefined> = {}) =>
+    new Promise<{ status: number | null; out: string; file: (n: string) => string }>((resolve) => {
+      const child = spawn(process.execPath, [cli, ...args], { cwd, env: { ...process.env, NO_COLOR: '1', ANTHROPIC_API_KEY: undefined, ...env } as NodeJS.ProcessEnv });
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.stderr.on('data', (d) => (out += d));
+      child.on('close', (status) => resolve({ status, out, file: (n) => readFileSync(join(cwd, n), 'utf8') }));
+      child.stdin.end(input);
+    });
+  const withMock = async (fn: (env: Record<string, string>) => Promise<void>) => {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => (body += d));
+      req.on('end', () => {
+        const sys: string = JSON.parse(body).system;
+        const out = /pre-fill/.test(sys)
+          ? { answers: { name: 'Coach Finder', summary: 'Helps new members find a coach and book a first session.', kind: 'mobile-app', primaryUsers: 'Busy parents who joined last month', goals: ['Book a first session in under 2 minutes'], nonGoals: ['Payments'] }, notes: ['Platforms not stated.'] }
+          : /tighten/.test(sys)
+            ? { rewrites: [{ id: 'primaryUsers', value: 'Busy parents booking care on their phone', why: 'One person.' }] }
+            : /ONE short follow-up/.test(sys)
+              ? { question: 'Which parents, and when?' }
+              : { value: 'Working parents booking in the evening on their phone' };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(out) }], usage: { input_tokens: 500, output_tokens: 50 } }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await fn({ ANTHROPIC_API_KEY: 'test', ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}` });
+    } finally {
+      server.close();
+    }
+  };
+  const quickInput = (users: string) => ['Demo', 'A small tool that helps teams write better briefs.', '1', '2', '', users, '', 'Writes a brief in under 5 minutes', '', 'Generate', '', '', '6'];
+
+  it('--from drafts answers offline, as defaults to confirm', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-from-'));
+    writeFileSync(join(cwd, 'PRD.md'), PRD);
+    const r = await run(['--from', 'PRD.md', '--quick', '-o', 'b.md', '-y'], cwd, '', { THE_LOWDOWN_NO_AI: '1' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /Drafted \d answers from PRD\.md \(without AI\)/);
+    assert.match(r.out, /Enter for: Coach Finder/);
+    const md = r.file('b.md');
+    assert.match(md, /# Design brief: Coach Finder/);
+    assert.match(md, /- Book a first session in under 2 minutes/);
+  });
+
+  it('--from drafts answers with AI when it is available', () => withMock(async (env) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-from-ai-'));
+    writeFileSync(join(cwd, 'PRD.md'), PRD);
+    const r = await run(['--from', 'PRD.md', '--quick', '-o', 'b.md', '-y'], cwd, '', env);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /Drafted 6 answers from PRD\.md\. /);
+    assert.match(r.out, /• Platforms not stated\./);
+    assert.match(r.out, /AI: under \$0\.01 of the \$0\.25 budget via the API/);
+    assert.match(r.file('b.md'), /\*\*Type:\*\* Mobile app/);
+  }));
+
+  it('falls back to offline when the AI fails', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-from-fail-'));
+    writeFileSync(join(cwd, 'PRD.md'), PRD);
+    const r = await run(['--from', 'PRD.md', '--quick', '-o', 'b.md', '-y'], cwd, '', { ANTHROPIC_API_KEY: 'x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /AI unavailable: .*Carrying on without it/);
+    assert.match(r.out, /\(without AI\)/);
+  });
+
+  it('asks a follow-up for a vague answer', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-fu-'));
+    const input = quickInput('Everyone');
+    input.splice(6, 0, 'Clinic front-desk staff on a shared desktop'); // the follow-up reply
+    const r = await run(['--quick', '--follow-ups', '--no-ai', '-o', 'b.md', '-y'], cwd, input.join('\n'));
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /↳ Who would use it first\?/);
+    assert.match(r.file('b.md'), /\*\*Primary user:\*\* Clinic front-desk staff on a shared desktop/);
+  });
+
+  it('tailors the follow-up with AI', () => withMock(async (env) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-fu-ai-'));
+    const input = quickInput('Parents');
+    input.splice(6, 0, 'working ones, evenings');
+    const r = await run(['--quick', '--follow-ups', '-o', 'b.md', '-y'], cwd, input.join('\n'), env);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /↳ Which parents, and when\?/);
+    assert.match(r.file('b.md'), /\*\*Primary user:\*\* Working parents booking in the evening on their phone/);
+  }));
+
+  it('--suggest offers rewrites in the review and applies the accepted ones', () => withMock(async (env) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-suggest-'));
+    const r = await run(['--quick', '--suggest', '-o', 'b.md', '-y'], cwd, [...quickInput('Everyone'), 'y'].join('\n'), env);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /- Everyone\n\s+\+ Busy parents booking care on their phone/);
+    assert.match(r.file('b.md'), /\*\*Primary user:\*\* Busy parents booking care on their phone/);
+  }));
+
+  it('lint --suggest prints rewrites, and says when AI is off', () => withMock(async (env) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-lint-ai-'));
+    writeFileSync(join(cwd, 'a.json'), JSON.stringify({ ...answers, primaryUsers: 'Everyone' }));
+    let r = await run(['lint', 'a.json', '--suggest'], cwd, '', env);
+    assert.match(r.out, /Suggested rewrites[\s\S]*\+ Busy parents booking care on their phone/);
+    r = await run(['lint', 'a.json', '--suggest', '--no-ai'], cwd, '', env);
+    assert.match(r.out, /need AI: set ANTHROPIC_API_KEY/);
+  }));
 });

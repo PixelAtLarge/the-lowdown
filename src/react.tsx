@@ -1,6 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import { isEmpty, rankItems, scaleRange } from './answers.js';
-import { lintBrief } from './lint.js';
+import type { Assistant, Rewrite } from './assist.js';
+import { followUpFor, type FollowUp } from './followups.js';
+import { lintBrief, questionForField } from './lint.js';
 import { renderBrief, toHTML, type RenderOptions } from './render.js';
 import { scoreBrief, scoreTips } from './score.js';
 import { BriefSession } from './session.js';
@@ -32,6 +34,7 @@ export function useBriefSession(opts: UseBriefSessionOptions = {}) {
     answerText: (raw: string) => { const r = session.answerText(raw); bump(); return r; },
     skip: () => { const r = session.skip(); bump(); return r; },
     back: () => { const q = session.back(); bump(); return q; },
+    set: (id: string, value: AnswerValue | undefined) => { const r = session.set(id, value); bump(); return r; },
     reset: (answers?: Answers) => {
       ref.current = new BriefSession({ questions: opts.questions, quick: opts.quick, answers, toneGuidance: opts.toneGuidance });
       bump();
@@ -62,6 +65,13 @@ export interface LowdownFormProps {
   showScore?: boolean;
   /** Show a "Print or save as PDF" button on the result screen. Default true. */
   printButton?: boolean;
+  /** Ask one more question when an answer is too vague to design from. Works offline. Default true. */
+  followUps?: boolean;
+  /**
+   * Optional AI help: tailored follow-ups and a "Suggest sharper answers" button in the review.
+   * Build one with createAssistant({ complete }), where complete calls your own server route.
+   */
+  assistant?: Assistant;
   /** Open on the finished brief when initialAnswers already cover the required questions (e.g. a shared link). */
   startAtResult?: boolean;
   /** Called after every answer. */
@@ -90,18 +100,21 @@ export function LowdownForm(props: LowdownFormProps) {
   const [stage, setStage] = useState<Stage>(canStartAtResult ? 'result' : 'questions');
   const [format, setFormat] = useState<OutputFormat>(formats[0] ?? 'markdown');
   const [error, setError] = useState<string>();
+  const [rewrites, setRewrites] = useState<RewriteState>({ state: 'idle' });
+  const [pending, setPending] = useState<{ fu: FollowUp; question: Question; value: AnswerValue; prompt: string }>();
+  const asked = useRef(new Set<string>());
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
 
   useEffect(() => {
-    if (stage === 'questions' && s.isComplete) setStage('review');
-  }, [stage, s.isComplete]);
+    if (stage === 'questions' && s.isComplete && !pending) setStage('review');
+  }, [stage, s.isComplete, pending]);
 
   const qid = s.current?.id;
   useEffect(() => {
     if (firstRender.current) { firstRender.current = false; return; }
     headingRef.current?.focus();
-  }, [qid, stage]);
+  }, [qid, stage, pending?.question.id]);
 
   const brief = useMemo(
     () => (stage === 'questions' ? undefined : s.session.missingRequired().length ? undefined : s.session.toBrief()),
@@ -112,10 +125,38 @@ export function LowdownForm(props: LowdownFormProps) {
   const score = useMemo(() => (brief ? scoreBrief(brief, issues) : undefined), [brief, issues]);
 
   const submit = (value: AnswerValue | undefined) => {
+    const question = s.current;
     const r = value === undefined || isEmpty(value) ? s.skip() : s.answer(value);
     if (!r.ok) { setError(r.error); return; }
     setError(undefined);
     onChange?.(s.session.answers);
+    // A vague answer gets one more question, once per question.
+    const given = question ? s.session.answers[question.id] : undefined;
+    const fu = question && props.followUps !== false && !asked.current.has(question.id) ? followUpFor(question, given, s.session.answers) : undefined;
+    if (fu && question && given !== undefined) {
+      asked.current.add(question.id);
+      setPending({ fu, question, value: given, prompt: fu.prompt });
+      props.assistant?.followUpQuestion(fu, given, s.session.answers).then(
+        (prompt) => setPending((p) => (p && p.fu === fu ? { ...p, prompt } : p)),
+        () => { /* keep the offline question */ },
+      );
+    }
+  };
+
+  const resolveFollowUp = async (reply: string) => {
+    if (!pending) return;
+    const { fu, question, value, prompt } = pending;
+    if (reply.trim()) {
+      let merged = fu.merge(value, reply);
+      if (props.assistant) {
+        try { merged = await props.assistant.mergeFollowUp(fu, value, prompt, reply, s.session.answers); } catch { /* offline merge */ }
+      }
+      const r = s.set(question.id, merged);
+      if (!r.ok) { setError(r.error); return; }
+      onChange?.(s.session.answers);
+    }
+    setError(undefined);
+    setPending(undefined);
   };
 
   const goBack = () => {
@@ -170,6 +211,7 @@ export function LowdownForm(props: LowdownFormProps) {
   }
 
   if (stage === 'review' && brief) {
+    const fixable = props.assistant ? issues.filter((i) => questionForField(i.field) && s.session.find(questionForField(i.field)!)) : [];
     return (
       <section className={cls} data-stage="review">
         <h3 className="ld-title" tabIndex={-1} ref={headingRef}>Review</h3>
@@ -200,10 +242,27 @@ export function LowdownForm(props: LowdownFormProps) {
             ))}
           </ul>
         )}
+        {props.assistant && (fixable.length > 0 || rewrites.state !== 'idle') && (
+          <Rewrites assistant={props.assistant} brief={brief} answers={s.answers} issues={fixable} questions={s.session.questions}
+            state={rewrites} setState={setRewrites} onUse={(r) => { const res = s.set(r.questionId, r.suggestion); if (res.ok) onChange?.(s.session.answers); }} />
+        )}
         <div className="ld-actions">
           <button type="button" className="ld-btn ld-btn-primary" onClick={createBrief}>Create brief</button>
           <button type="button" className="ld-btn ld-btn-quiet" onClick={goBack}>Back</button>
         </div>
+      </section>
+    );
+  }
+
+  if (pending) {
+    const section = s.session.sections.find((x) => x.id === pending.question.section);
+    return (
+      <section className={cls} data-stage="follow-up">
+        <div className="ld-progress">
+          <span className="ld-section">{section?.title ?? pending.question.section}</span>
+          <span className="ld-count">One more thing</span>
+        </div>
+        <FollowUpField key={pending.question.id} pending={pending} error={error} headingRef={headingRef} onDone={resolveFollowUp} />
       </section>
     );
   }
@@ -433,4 +492,109 @@ function printHTML(html: string) {
   };
   frame.srcdoc = html;
   document.body.appendChild(frame);
+}
+
+type RewriteState =
+  | { state: 'idle' }
+  | { state: 'loading' }
+  | { state: 'error'; message: string }
+  | { state: 'ready'; items: Array<Rewrite & { status: 'open' | 'used' | 'skipped' }> };
+
+const shown = (q: Question | undefined, v: AnswerValue | undefined) => {
+  if (v === undefined) return '';
+  const label = (x: string) => q?.choices?.find((c) => c.value === x)?.label ?? x;
+  return Array.isArray(v) ? v.map(label).join(' · ') : typeof v === 'boolean' ? (v ? 'Yes' : 'No') : label(String(v));
+};
+
+function Rewrites(props: {
+  assistant: Assistant;
+  brief: Brief;
+  answers: Answers;
+  issues: LintIssue[];
+  questions: Question[];
+  state: RewriteState;
+  setState: (s: RewriteState) => void;
+  onUse: (r: Rewrite) => void;
+}) {
+  const { state, setState } = props;
+  const ask = async () => {
+    setState({ state: 'loading' });
+    try {
+      const items = await props.assistant.suggestRewrites(props.brief, props.answers, props.issues);
+      setState({ state: 'ready', items: items.map((r) => ({ ...r, status: 'open' as const })) });
+    } catch (e) {
+      setState({ state: 'error', message: (e as Error).message });
+    }
+  };
+  const mark = (i: number, status: 'used' | 'skipped') => {
+    if (state.state !== 'ready') return;
+    const item = state.items[i]!;
+    if (status === 'used') props.onUse(item);
+    setState({ state: 'ready', items: state.items.map((x, n) => (n === i ? { ...x, status } : x)) });
+  };
+
+  return (
+    <div className="ld-rewrites" aria-live="polite">
+      {state.state === 'idle' && (
+        <button type="button" className="ld-btn" onClick={ask}>Suggest sharper answers</button>
+      )}
+      {state.state === 'loading' && <p className="ld-hint">Asking for sharper answers…</p>}
+      {state.state === 'error' && (
+        <p className="ld-error">Couldn't get suggestions: {state.message} <button type="button" className="ld-btn ld-btn-quiet" onClick={ask}>Try again</button></p>
+      )}
+      {state.state === 'ready' && state.items.length === 0 && <p className="ld-hint">No rewrites to suggest.</p>}
+      {state.state === 'ready' && state.items.length > 0 && (
+        <ul className="ld-rewrite-list">
+          {state.items.map((r, i) => {
+            const q = props.questions.find((x) => x.id === r.questionId);
+            return (
+              <li key={r.questionId} className="ld-rewrite" data-status={r.status}>
+                <p className="ld-rewrite-label">{r.label}</p>
+                {r.current !== undefined && <p className="ld-rewrite-old"><span className="ld-visually-hidden">Now: </span>{shown(q, r.current)}</p>}
+                <p className="ld-rewrite-new"><span className="ld-visually-hidden">Suggested: </span>{shown(q, r.suggestion)}</p>
+                {r.why && <p className="ld-hint">{r.why}</p>}
+                {r.status === 'open' ? (
+                  <div className="ld-actions ld-actions-tight">
+                    <button type="button" className="ld-btn" onClick={() => mark(i, 'used')}>Use this</button>
+                    <button type="button" className="ld-btn ld-btn-quiet" onClick={() => mark(i, 'skipped')}>Keep mine</button>
+                  </div>
+                ) : (
+                  <p className="ld-hint">{r.status === 'used' ? 'Used.' : 'Kept yours.'}</p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function FollowUpField({ pending, error, headingRef, onDone }: {
+  pending: { fu: FollowUp; question: Question; value: AnswerValue; prompt: string };
+  error?: string;
+  headingRef: RefObject<HTMLHeadingElement>;
+  onDone: (reply: string) => void;
+}) {
+  const id = useId();
+  const [reply, setReply] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try { await onDone(reply); } finally { setBusy(false); }
+  };
+  return (
+    <form className="ld-question ld-follow-up" onSubmit={submit} noValidate>
+      <p className="ld-hint">You said: <strong>{shown(pending.question, pending.fu.item ?? pending.value)}</strong></p>
+      <h3 className="ld-title" id={`${id}-q`} tabIndex={-1} ref={headingRef}><label htmlFor={id}>{pending.prompt}</label></h3>
+      <input id={id} className="ld-input" value={reply} onChange={(e) => setReply(e.target.value)} autoComplete="off"
+        placeholder={pending.fu.example ? `e.g. ${pending.fu.example}` : undefined} aria-describedby={error ? `${id}-err` : undefined} />
+      {error && <p className="ld-error" id={`${id}-err`} role="alert">{error}</p>}
+      <div className="ld-actions">
+        <button type="submit" className="ld-btn ld-btn-primary" disabled={busy || !reply.trim()}>Update answer</button>
+        <button type="button" className="ld-btn ld-btn-quiet" disabled={busy} onClick={() => onDone('')}>Keep my answer</button>
+      </div>
+    </form>
+  );
 }

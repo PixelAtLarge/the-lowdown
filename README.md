@@ -94,6 +94,12 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
     --no-checklist        Leave out the definition-of-done checklist
     --no-frontmatter      Leave out the small YAML header in Markdown files
     --only <list>         edit: re-ask just these sections or question ids (e.g. goals,tone)
+    --from <file|url>     Draft answers from a PRD, README or web page; you confirm each one
+    --suggest             Suggest sharper answers for what the review flags (lint: print them)
+    --no-follow-ups       Don't ask a follow-up when an answer is vague (on in a terminal)
+    --no-ai               Don't use AI, even when it's available
+    --model <id>          Claude model for every AI step
+    --budget <usd>        AI spend cap for this run (default 0.25)
     --link                After writing, point your agent instruction files at the brief
     --link-to <list>      claude, agents, cursor, copilot (default: whichever exist, else AGENTS.md)
 -y, --yes                 Don't ask before writing or overwriting
@@ -120,6 +126,30 @@ the-lowdown lint BRIEF.md             # warnings, tips and a strength score
 `edit` shows the changes and the review before it writes, and keeps the brief's original date. `diff` exits 1 when the briefs differ, so it works as a CI check.
 
 The **strength score** (0–100, Thin / Okay / Strong / Excellent) appears in the review step and in `lint`. It counts a specific primary user, measurable and ranked goals, scope, a primary action, a clear tone, fidelity, constraints, accessibility, context and project specifics, minus points for each warning, then names the two changes that would add the most.
+
+### AI help (optional)
+
+The core never needs AI, a network or an API key. When Claude is available, three things get better:
+
+```sh
+the-lowdown --from PRD.md          # or README.md, or https://…; drafts answers you confirm one by one
+the-lowdown --suggest              # in the review: sharper rewrites for each flagged answer, accept or skip
+the-lowdown lint BRIEF.md --suggest
+```
+
+- **`--from`** reads a PRD, README or web page and drafts answers. Each one shows up as the default, so Enter accepts it and typing changes it; nothing slips in unseen. Without AI it still picks up the title, the opening paragraph and lists under headings like "Goals", "Users", "Out of scope" and "Tech stack".
+- **Rewrites:** "Feels intuitive" becomes "A first-time member books a session without help". Where a number would help, the suggestion leaves a guess in brackets, like "[60] seconds", for you to adjust. In a terminal the review offers them; `--suggest` asks every time.
+- **Follow-ups:** a vague answer ("Everyone", "Feels intuitive", "An app") gets one more question. This works offline with built-in questions; with AI the question is tailored and your reply is folded into the answer.
+
+**Setup** is the same as Peanut Gallery. With `ANTHROPIC_API_KEY` set, it calls the API directly. Otherwise, it reuses a Claude Code login (`claude`, then `/login`) and runs Claude Code as a plain completion: no tools, no MCP servers, none of your settings or CLAUDE.md, and nothing saved to your session history. There's nothing extra to install either way. If AI fails partway, the run says so once and carries on without it.
+
+**Models and budget:** drafting from a document uses `claude-sonnet-5-5`; rewrites and follow-ups use `claude-haiku-5-5`. Each run stops using AI before it would pass `--budget` (default $0.25), and prints what it spent. A typical run costs a cent or two. In config:
+
+```json
+{ "ai": { "budget": 0.5, "models": { "draft": "claude-opus-5-5" } }, "followUps": true }
+```
+
+`"ai": false` turns it off for the whole team; `THE_LOWDOWN_MODEL` and `ANTHROPIC_BASE_URL` work too.
 
 ### Team config
 
@@ -194,6 +224,14 @@ const prompt = renderBrief(brief, 'prompt');  // 'markdown' | 'prompt' | 'json' 
 const { brief: edited, answers: recovered } = readBrief(markdownText);
 const changes = diffBriefs(brief, edited);    // [{ label, kind: 'value' | 'list', … }]
 
+// AI help: bring any model call. Node providers live at '@pixelatlarge/the-lowdown/ai'.
+import { createAssistant, followUpFor } from '@pixelatlarge/the-lowdown';
+import { autoComplete, anthropicApi, claudeCode, readSource } from '@pixelatlarge/the-lowdown/ai';
+const assistant = createAssistant({ complete: autoComplete()!, budget: 0.5 });
+const { answers: drafted } = await assistant.draftAnswers(await readSource('PRD.md'));
+const rewrites = await assistant.suggestRewrites(brief, answers); // [{ questionId, current, suggestion, why }]
+const followUp = followUpFor(question, answer);                   // offline; undefined when the answer is specific
+
 // Shareable links: answers live in the URL hash, so no server is involved
 const url = shareUrl('https://example.com/brief', answers); // …#a=v1.eyJu…
 const back = answersFromHash(new URL(url).hash);
@@ -220,7 +258,7 @@ import '@pixelatlarge/the-lowdown/react/styles.css'; // optional default theme
 />
 ```
 
-It asks one question at a time, shows the brief check and strength score before creating the brief, then offers Markdown, prompt and JSON tabs (add `'html'` to `formats` for a fourth) with copy, download, and print or save as PDF. Props include `questions`, `quick`, `initialAnswers`, `startAtResult`, `toneGuidance`, `showScore`, `printButton`, `onChange`, `onComplete`, `formats`, `renderOptions` and `resultActions`. Restyle it with the `--ld-*` CSS variables (`--ld-accent`, `--ld-font`, `--ld-radius`…), or skip the stylesheet and style the `ld-` classes yourself. `useBriefSession()` is exported too, for building a fully custom UI.
+It asks one question at a time, shows the brief check and strength score before creating the brief, then offers Markdown, prompt and JSON tabs (add `'html'` to `formats` for a fourth) with copy, download, and print or save as PDF. Vague answers get one follow-up question (`followUps={false}` turns that off). Pass an `assistant` to tailor those follow-ups and add a "Suggest sharper answers" button to the review. Build it with `createAssistant({ complete })`, where `complete` calls your own server route, so your API key never reaches the browser. Props include `questions`, `quick`, `initialAnswers`, `startAtResult`, `toneGuidance`, `showScore`, `printButton`, `followUps`, `assistant`, `onChange`, `onComplete`, `formats`, `renderOptions` and `resultActions`. Restyle it with the `--ld-*` CSS variables (`--ld-accent`, `--ld-font`, `--ld-radius`…), or skip the stylesheet and style the `ld-` classes yourself. `useBriefSession()` is exported too, for building a fully custom UI.
 
 ### Headless session (build your own UI)
 
@@ -266,7 +304,7 @@ Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`, 
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `toHTML`, `lintBrief`, `scoreBrief`, `scoreTips`, `readBrief`, `diffBriefs`, `parseMarkdownBrief`, `isMarkdownBrief`, `stripFrontmatter`, `markdownToHtml`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `toHTML`, `lintBrief`, `scoreBrief`, `scoreTips`, `readBrief`, `diffBriefs`, `parseMarkdownBrief`, `isMarkdownBrief`, `stripFrontmatter`, `markdownToHtml`, `createAssistant`, `followUpFor`, `draftFromText`, `htmlToText`, `questionForField`, `coerceAnswer`, `BudgetError`, `PRICES`, `DEFAULT_MODELS`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `anthropicApi`, `claudeCode`, `autoComplete`, `detectAi` and `readSource` from `@pixelatlarge/the-lowdown/ai`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
 
 ## Example output
 

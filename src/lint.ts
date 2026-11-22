@@ -2,14 +2,33 @@ import { TONE_TENSIONS } from './questions.js';
 import { parseReference } from './brief.js';
 import type { Brief, LintIssue } from './types.js';
 
-const BROAD_USERS =
+export const BROAD_USERS =
   /^(every(one|body)|anyone|all( of)?( the)?( users| people)?|users|people|the general public|general public|customers)\.?$/i;
 
-const VAGUE =
+export const VAGUE =
   /\b(intuitive|user[- ]friendly|modern|clean|sleek|nice|beautiful|easy to use|seamless|engaging|delightful|best[- ]in[- ]class|world[- ]class)\b/i;
 
-const MEASURABLE =
+export const MEASURABLE =
   /\d|%|\b(under|within|at least|at most|fewer|less than|more than|increase|reduce|decrease|without help|first try|no errors?)\b/i;
+
+const FIELD_QUESTIONS: Record<string, string> = {
+  'project.summary': 'summary',
+  'users.primary': 'primaryUsers',
+  'users.accessibility': 'accessibility',
+  'goals.successCriteria': 'goals',
+  'goals.nonGoals': 'nonGoals',
+  'goals.primaryAction': 'primaryAction',
+  'constraints.stack': 'stack',
+  'constraints.mustInclude': 'mustInclude',
+  'tone.traits': 'tone',
+  'tone.references': 'references',
+};
+
+/** The question whose answer a lint issue is about, e.g. "users.primary" → "primaryUsers". */
+export function questionForField(field: string): string | undefined {
+  if (field.startsWith('specifics.')) return field.slice('specifics.'.length);
+  return FIELD_QUESTIONS[field];
+}
 
 /**
  * Flag parts of a brief that tend to produce weak agent output: broad

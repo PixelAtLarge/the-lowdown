@@ -1,6 +1,6 @@
 {
   "name": "@pixelatlarge/the-lowdown",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Give your AI agent the lowdown: a short guided Q&A that writes a design brief (users, goals, constraints, tone) for agents to follow.",
   "keywords": [
     "the-lowdown",

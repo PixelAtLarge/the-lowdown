@@ -25,8 +25,8 @@ Zero runtime dependencies. Node 18.17+.
 Run it without installing, or install it globally to get the `the-lowdown` command:
 
 ```sh
-npx @pixelatlarge/the-lowdown            # ~17 questions, writes BRIEF.md
-npx @pixelatlarge/the-lowdown --quick    # ~11 essential questions
+npx @pixelatlarge/the-lowdown            # 21–25 questions, writes BRIEF.md
+npx @pixelatlarge/the-lowdown --quick    # 11–12 essential questions
 
 npm i -g @pixelatlarge/the-lowdown
 the-lowdown
@@ -42,17 +42,33 @@ npx @pixelatlarge/the-lowdown link      # or add --link when you create the brie
 
 This adds a short "follow BRIEF.md" block to the agent instruction files you already have: `CLAUDE.md`, `AGENTS.md`, Cursor rules or Copilot instructions. If you have none, it creates `AGENTS.md`. Running it again updates the block instead of adding another, and nothing else in those files is touched. Pick files explicitly with `--link-to claude,cursor`.
 
-While answering: **Enter** skips an optional question (or accepts the default), **`<`** goes back, **`?`** explains why a question matters. Choices accept numbers (`1,3`), labels, or your own words where allowed.
+While answering: **Enter** skips an optional question (or accepts the default), **`<`** goes back, **`?`** explains why a question matters. Choices are arrow-key menus: **↑↓** to move, **space** to pick, **enter** to confirm. Prefer typing? `--plain` takes numbers (`1,3`), labels, or your own words instead, and so does any piped input.
 
 ## What it asks
 
 | Section | Questions |
 | --- | --- |
 | Project | Name\*, summary\*, kind, fidelity |
-| Users | Primary user\*, situation, accessibility |
-| Goals | Success criteria\*, primary action, out of scope |
-| Constraints | Platforms, stack / design system, must include, must avoid |
-| Tone | Up to three tone words, references, "never feel like" |
+| Specifics | Two or three questions for the kind of project (below) |
+| Users | Primary user\*, situation, secondary users, accessibility |
+| Goals | Success criteria\*, goal ranking (with two or more goals), primary action, out of scope |
+| Constraints | Platforms, stack / design system, real content available?, brand assets, things that apply everywhere (dark mode, localization…), must include, must avoid |
+| Tone | Up to three tone words, references and what to borrow from each, "never feel like" |
+
+### Questions by project type
+
+Asked only when the project kind matches, so the interview stays short.
+
+| Kind | Asks about |
+| --- | --- |
+| Web app | Key flows, start to finish |
+| Marketing site | The conversion goal, where visitors come from, real proof points |
+| Mobile app | Offline needs, one-handed use, native vs. shared design |
+| Dashboard | The numbers that matter most, data density (1–5 scale), data freshness |
+| Components | Which components, where the design tokens live, usage docs |
+| Content | Format and size, where it will appear |
+
+Ranked goals come out as a numbered list ("when two conflict, the higher one wins"). "No content yet" tells the agent to write realistic copy and never invent quotes or numbers. References written as `Headspace — the calm pacing` come out as "borrow the calm pacing", and the brief check nudges you when a reference has nothing to borrow.
 
 \* required
 
@@ -69,6 +85,8 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
 -f, --format <fmt>        markdown | prompt | json  (default: from --out extension)
 -q, --quick               Essential questions only
     --answers <file>      Prefill from JSON; only missing questions are asked
+    --config <file>       Team config (default: .lowdownrc.json, .lowdownrc or lowdown.config.json)
+    --plain               Type numbers instead of using arrow-key menus
     --save-answers <file> Also save raw answers (edit and re-render later)
     --no-instructions     Leave out the "How to use this brief" section
     --no-checklist        Leave out the definition-of-done checklist
@@ -83,6 +101,35 @@ the-lowdown link [brief]         Point CLAUDE.md / AGENTS.md / Cursor rules at a
 | `agents` | `AGENTS.md` |
 | `cursor` | `.cursor/rules/the-lowdown.mdc` (always-applied rule) |
 | `copilot` | `.github/copilot-instructions.md` |
+
+### Team config
+
+Put a `.lowdownrc.json` in your project (or pass `--config`) to give everyone the same setup. Every field is optional, and command-line flags win.
+
+```json
+{
+  "quick": true,
+  "out": "docs/BRIEF.md",
+  "link": ["claude", "cursor"],
+  "answers": { "stack": "React + Tailwind; use @acme/ui components first" },
+  "defaults": { "platforms": ["Mobile web", "Desktop web"], "accessibility": ["WCAG 2.2 AA"] },
+  "skip": ["references"],
+  "questions": [
+    { "id": "hasBrand", "section": "brand", "type": "confirm", "prompt": "Is there an existing brand?", "quick": true },
+    { "id": "brandUrl", "section": "brand", "type": "text", "prompt": "Link to the brand guidelines",
+      "condition": { "hasBrand": true } }
+  ],
+  "sections": { "brand": { "title": "Brand", "intro": "What we already have" } },
+  "overrides": {
+    "primaryUsers": { "help": "Name the segment from our research deck." }
+  }
+}
+```
+
+- `answers` are fixed and never asked; `defaults` are pre-selected and accepted with Enter.
+- `questions` adds your own. Place one with `"after": "<question id>"`, ask it in quick mode with `"quick": true`, and show it only sometimes with a `condition`: `{ "kind": "dashboard" }`, `{ "kind": ["web-app", "dashboard"] }`, `{ "hasBrand": true }`, or `{ "stack": "*" }` for "answered at all".
+- `overrides` rewords built-in questions (`prompt`, `help`, `example`, `choiceLabels`, `choiceHints`, `minLabel`, `maxLabel`, `required`, `quick`, `default`), and `sections` renames sections. Together they can **translate the interview**, for example `{ "fidelity": { "prompt": "¿Qué tan terminado?", "choiceLabels": { "sketch": "Boceto" } } }`. The command-line chrome itself stays in English for now.
+- `the-lowdown questions` prints the questions with your config applied, so an agent running the interview sees your team's version.
 
 ### Output formats
 
@@ -175,23 +222,20 @@ import { BriefSession, DEFAULT_QUESTIONS, type Question } from '@pixelatlarge/th
 const questions: Question[] = [
   ...DEFAULT_QUESTIONS,
   { id: 'hasBrand', section: 'brand', type: 'confirm', prompt: 'Is there an existing brand?' },
-  {
-    id: 'brandUrl',
-    section: 'brand',
-    type: 'text',
-    prompt: 'Link to brand guidelines',
-    when: (a) => a.hasBrand === true,
-  },
+  { id: 'brandUrl', section: 'brand', type: 'text', prompt: 'Link to brand guidelines', condition: { hasBrand: true } },
+  { id: 'polish', section: 'brand', type: 'scale', prompt: 'How polished?', min: 1, max: 5, minLabel: 'Scrappy', maxLabel: 'Pristine' },
 ];
 
 const session = new BriefSession({ questions });
 ```
 
-Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`. Options include `required`, `quick`, `default`, `choices`, `allowOther`, `max`, `when` and `validate`.
+Or start from a config object with `applyConfig(config)`, which returns `{ questions, sections, answers }` for a session and works in the browser too.
+
+Question types: `text`, `longtext`, `list`, `select`, `multiselect`, `confirm`, `scale` (a whole number between `min` and `max`, with optional `minLabel` / `maxLabel`) and `rank` (put items in priority order; `rankFrom: '<list question id>'` ranks another answer's items, otherwise the `choices`). Options include `required`, `quick`, `default`, `choices`, `allowOther`, `max`, `condition`, `when` and `validate`.
 
 ### Exports
 
-`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
+`BriefSession`, `buildBrief`, `createBrief`, `renderBrief`, `encodeAnswers`, `decodeAnswers`, `shareUrl`, `answersFromHash`, `toMarkdown`, `toPrompt`, `toJSON`, `lintBrief`, `applyConfig`, `validateConfig`, `parseInput`, `normalizeAnswer`, `validateAnswer`, `matchesCondition`, `isApplicable`, `rankItems`, `scaleRange`, `parseReference`, `questionsToJSON`, `isBrief`, and the data behind the defaults: `DEFAULT_QUESTIONS`, `SECTIONS`, `TONE_GUIDANCE`, `TONE_TENSIONS`, `FIDELITY_GUIDANCE`, `CONTENT_GUIDANCE`, `ACCESSIBILITY_CHOICES`, `AGENT_INSTRUCTIONS`. All types are exported. `linkBrief` and `detectLinkTargets` come from `@pixelatlarge/the-lowdown/link`; `LowdownForm`, `useBriefSession` and `CopyButton` from `@pixelatlarge/the-lowdown/react`.
 
 ## Example output
 

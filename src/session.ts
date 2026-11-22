@@ -1,4 +1,4 @@
-import { isEmpty, normalizeAnswer, parseInput, validateAnswer } from './answers.js';
+import { isApplicable, isEmpty, normalizeAnswer, parseInput, validateAnswer } from './answers.js';
 import { buildBrief } from './brief.js';
 import { DEFAULT_QUESTIONS, SECTIONS } from './questions.js';
 import type { AnswerValue, Answers, Brief, Question, Section } from './types.js';
@@ -10,6 +10,8 @@ export interface SessionOptions {
   answers?: Answers;
   /** Only ask required questions and those marked `quick`. */
   quick?: boolean;
+  /** Section titles and intros. Defaults to SECTIONS. */
+  sections?: Section[];
 }
 
 export type AnswerResult = { ok: true } | { ok: false; error: string };
@@ -31,15 +33,16 @@ export class BriefSession {
   constructor(opts: SessionOptions = {}) {
     this.questions = opts.questions ?? DEFAULT_QUESTIONS;
     this.quick = opts.quick ?? false;
+    const base = opts.sections ?? SECTIONS;
     const extraSections = [...new Set(this.questions.map((q) => q.section))]
-      .filter((id) => !SECTIONS.some((s) => s.id === id))
+      .filter((id) => !base.some((s) => s.id === id))
       .map((id) => ({ id, title: titleCase(id) }));
-    this.sections = [...SECTIONS, ...extraSections];
+    this.sections = [...base, ...extraSections];
 
-    this._answers = {};
-    for (const [id, value] of Object.entries(opts.answers ?? {})) {
+    this._answers = { ...(opts.answers ?? {}) };
+    for (const [id, value] of Object.entries(this._answers)) {
       const q = this.find(id);
-      this._answers[id] = q ? normalizeAnswer(q, value) : value;
+      if (q) this._answers[id] = normalizeAnswer(q, value, this._answers);
     }
   }
 
@@ -54,8 +57,7 @@ export class BriefSession {
   /** Questions that apply given quick mode and current answers. */
   applicable(): Question[] {
     return this.questions.filter(
-      (q) =>
-        (!this.quick || q.required || q.quick) && (q.when ? q.when(this._answers) : true),
+      (q) => (!this.quick || q.required || q.quick) && isApplicable(q, this._answers),
     );
   }
 
@@ -90,7 +92,7 @@ export class BriefSession {
   answer(value: AnswerValue): AnswerResult {
     const q = this.current();
     if (!q) return { ok: false, error: 'No question to answer; the session is complete.' };
-    const normalized = normalizeAnswer(q, value);
+    const normalized = normalizeAnswer(q, value, this._answers);
     const valid = validateAnswer(q, normalized, this._answers);
     if (valid !== true) return { ok: false, error: valid };
     if (isEmpty(normalized)) {
@@ -106,7 +108,7 @@ export class BriefSession {
   answerText(raw: string): AnswerResult {
     const q = this.current();
     if (!q) return { ok: false, error: 'No question to answer; the session is complete.' };
-    return this.answer(parseInput(q, raw));
+    return this.answer(parseInput(q, raw, this._answers));
   }
 
   /** Skip the current question, using its default if it has one. */

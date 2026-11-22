@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname } from 'node:path';
-import { createInterface, type Interface } from 'node:readline';
+import { createInterface, emitKeypressEvents, type Interface } from 'node:readline';
 import { parseArgs } from 'node:util';
+import { rankItems, scaleRange } from './answers.js';
 import { buildBrief, isBrief } from './brief.js';
+import { applyConfig, validateConfig, type LowdownConfig } from './config.js';
 import { linkBrief, parseLinkTargets, type LinkResult } from './link.js';
 import { lintBrief } from './lint.js';
-import { DEFAULT_QUESTIONS } from './questions.js';
+import { createMenu, menuReducer, renderMenu, type MenuItem, type MenuKey, type MenuResult, type MenuState } from './menu.js';
 import { renderBrief, type RenderOptions } from './render.js';
 import { questionsToJSON } from './serialize.js';
 import { BriefSession } from './session.js';
-import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question } from './types.js';
+import type { AnswerValue, Answers, Brief, LintIssue, OutputFormat, Question, Section } from './types.js';
 
 // ── Terminal helpers ─────────────────────────────────────────
 
@@ -26,7 +28,8 @@ const red = paint('31');
 const say = (s = '') => err.write(s + '\n');
 
 class LineReader {
-  private readonly rl: Interface;
+  private rl!: Interface;
+  private suspended = false;
   private readonly queue: string[] = [];
   private readonly waiters: Array<(line: string | null) => void> = [];
   private closed = false;
@@ -34,6 +37,10 @@ class LineReader {
 
   constructor() {
     this.terminal = Boolean(process.stdin.isTTY && err.isTTY);
+    this.open();
+  }
+
+  private open() {
     this.rl = createInterface({ input: process.stdin, output: err, terminal: this.terminal });
     this.rl.on('line', (line) => {
       const w = this.waiters.shift();
@@ -41,6 +48,7 @@ class LineReader {
       else this.queue.push(line);
     });
     this.rl.on('close', () => {
+      if (this.suspended) return;
       this.closed = true;
       for (const w of this.waiters.splice(0)) w(null);
     });
@@ -72,9 +80,88 @@ class LineReader {
     );
   }
 
+  /** Hand stdin to a raw-mode menu, then take it back. */
+  async withRawInput<T>(fn: () => Promise<T>): Promise<T> {
+    this.suspended = true;
+    this.rl.close();
+    try {
+      return await fn();
+    } finally {
+      this.suspended = false;
+      this.open();
+    }
+  }
+
   close() {
     this.rl.close();
   }
+}
+
+// ── Arrow-key menus (TTY only) ───────────────────────────────
+
+/** Translate a keypress into a menu key. */
+function toMenuKey(str: string | undefined, key: { name?: string; ctrl?: boolean } = {}): MenuKey | 'cancel' | undefined {
+  if (key.ctrl && key.name === 'c') return 'cancel';
+  if (str === '<') return { name: 'back' };
+  if (str === '?') return { name: 'help' };
+  if (str && /^[1-9]$/.test(str)) return { name: 'digit', digit: Number(str) };
+  const map: Record<string, MenuKey> = {
+    up: { name: 'up' }, k: { name: 'up' }, down: { name: 'down' }, j: { name: 'down' },
+    space: { name: 'space' }, return: { name: 'enter' }, enter: { name: 'enter' },
+    home: { name: 'home' }, end: { name: 'end' }, left: { name: 'back' }, escape: { name: 'back' },
+  };
+  return key.name ? map[key.name] : undefined;
+}
+
+async function runMenu(reader: LineReader, initial: MenuState): Promise<MenuResult> {
+  return reader.withRawInput(
+    () =>
+      new Promise<MenuResult>((resolve) => {
+        emitKeypressEvents(process.stdin);
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        err.write('\x1b[?25l'); // hide cursor
+        let state = initial;
+        let drawn = 0;
+        let finished = false;
+        const draw = () => {
+          if (drawn) err.write(`\x1b[${drawn}A\x1b[0J`);
+          const lines = renderMenu(state, { dim, cyan, bold });
+          err.write(lines.join('\n') + '\n');
+          drawn = lines.length;
+        };
+        const cleanup = () => {
+          process.stdin.off('keypress', onKey);
+          err.write('\x1b[?25h');
+          process.stdin.setRawMode(false);
+          process.stdin.pause();
+        };
+        // One listener for the whole menu, so keys that arrive together (held
+        // arrows, fast typing, pasted digits) are all handled in order.
+        const onKey = (str: string | undefined, key?: { name?: string; ctrl?: boolean }) => {
+          if (finished) return;
+          const k = toMenuKey(str, key);
+          if (!k) return;
+          if (k === 'cancel') {
+            cleanup();
+            say('\n' + dim('Cancelled. Nothing was written.'));
+            process.exit(130);
+          }
+          const { state: next, result } = menuReducer(state, k);
+          state = next;
+          if (result) {
+            finished = true;
+            err.write(`\x1b[${drawn}A\x1b[0J`);
+            cleanup();
+            resolve(result);
+            return;
+          }
+          draw();
+        };
+        process.stdin.on('keypress', onKey);
+        draw();
+      }),
+  );
 }
 
 // ── Arg parsing ──────────────────────────────────────────────
@@ -93,6 +180,8 @@ ${bold('Options')}
   -f, --format <fmt>        markdown | prompt | json  (default: from --out extension, else markdown)
   -q, --quick               Essential questions only
       --answers <file>      Prefill answers from JSON; only missing questions are asked
+      --config <file>       Team config (default: .lowdownrc.json, .lowdownrc or lowdown.config.json if present)
+      --plain               Type numbers instead of using arrow-key menus
       --save-answers <file> Also save your raw answers as JSON (re-render or edit later)
       --no-instructions     Leave out the "How to use this brief" section
       --no-checklist        Leave out the definition-of-done checklist
@@ -107,6 +196,7 @@ ${bold('While answering')}
   Enter   skip an optional question (or accept the default)
   <       go back one question
   ?       show why the question matters
+  Menus   ↑↓ to move, space to pick, enter to confirm (or type the numbers with --plain)
 `;
 
 function readVersion(): string {
@@ -138,11 +228,11 @@ function readJSON(path: string): unknown {
   }
 }
 
-function loadBrief(path: string): Brief {
+function loadBrief(path: string, questions?: Question[]): Brief {
   const data = readJSON(path);
   if (isBrief(data)) return data;
   if (data && typeof data === 'object' && !Array.isArray(data)) {
-    return buildBrief(data as Answers);
+    return buildBrief(data as Answers, { questions });
   }
   throw new Error(`${path} is neither a brief nor an answers object.`);
 }
@@ -160,6 +250,47 @@ function printIssues(issues: LintIssue[]) {
 
 // ── Interactive interview ────────────────────────────────────
 
+function describeScale(q: Question): string[] {
+  const { min, max } = scaleRange(q);
+  const ends = q.minLabel && q.maxLabel ? `${min} = ${q.minLabel}, ${max} = ${q.maxLabel}` : `${min} to ${max}`;
+  return [dim(`  A number from ${min} to ${max} (${ends})`)];
+}
+
+function describeRank(items: string[]): string[] {
+  return [
+    ...items.map((item, i) => `  ${dim(String(i + 1).padStart(2) + '.')} ${item}`),
+    dim(`  Numbers in priority order, most important first (e.g. ${items.map((_, i) => i + 1).reverse().join(',')})`),
+  ];
+}
+
+function menuFor(q: Question, answers: Answers, initial: AnswerValue | undefined): MenuState | undefined {
+  const asList = (v: AnswerValue | undefined) => (v === undefined ? [] : Array.isArray(v) ? v : [String(v)]);
+  if (q.type === 'select' || q.type === 'multiselect') {
+    if (!q.choices?.length) return undefined;
+    return createMenu({
+      mode: q.type === 'select' ? 'single' : 'multi',
+      items: q.choices,
+      picked: asList(initial),
+      max: q.max,
+      allowOther: q.allowOther,
+      optional: !q.required,
+    });
+  }
+  if (q.type === 'scale') {
+    const { min, max } = scaleRange(q);
+    const items: MenuItem[] = [];
+    for (let n = min; n <= max; n++) {
+      items.push({ value: String(n), label: String(n), hint: n === min ? q.minLabel : n === max ? q.maxLabel : undefined });
+    }
+    return createMenu({ mode: 'single', items, picked: asList(initial), optional: !q.required });
+  }
+  if (q.type === 'rank') {
+    const items = rankItems(q, answers).map((i) => ({ value: i, label: i }));
+    return createMenu({ mode: 'order', items, picked: asList(initial), optional: !q.required });
+  }
+  return undefined;
+}
+
 function describeChoices(q: Question): string[] {
   const lines = (q.choices ?? []).map((c, i) => {
     const n = dim(String(i + 1).padStart(2) + '.');
@@ -175,7 +306,16 @@ function describeChoices(q: Question): string[] {
 }
 
 const showValue = (v: AnswerValue) =>
-  typeof v === 'boolean' ? (v ? 'yes' : 'no') : Array.isArray(v) ? v.join(', ') : v;
+  typeof v === 'boolean' ? (v ? 'yes' : 'no') : Array.isArray(v) ? v.join(', ') : String(v);
+
+/** An answer as the person saw it: choice labels, "4 of 5", ranked order. */
+function showChosen(q: Question, v: AnswerValue | undefined): string {
+  if (v === undefined) return dim('skipped');
+  const label = (x: string) => q.choices?.find((c) => c.value === x)?.label ?? x;
+  if (q.type === 'scale') return `${v} of ${scaleRange(q).max}`;
+  if (q.type === 'rank' && Array.isArray(v)) return v.map((x, i) => `${i + 1}. ${x}`).join('  ');
+  return Array.isArray(v) ? v.map(label).join(', ') : typeof v === 'string' ? label(v) : showValue(v);
+}
 
 async function askList(reader: LineReader, first: string): Promise<string | null> {
   const items = [first];
@@ -187,7 +327,7 @@ async function askList(reader: LineReader, first: string): Promise<string | null
   return items.join('\n');
 }
 
-async function interview(session: BriefSession, reader: LineReader): Promise<boolean> {
+async function interview(session: BriefSession, reader: LineReader, menus: boolean): Promise<boolean> {
   let lastSection = '';
   for (;;) {
     const q = session.current();
@@ -204,7 +344,35 @@ async function interview(session: BriefSession, reader: LineReader): Promise<boo
     const draft = session.draft(q.id);
     say();
     say(`${dim(`[${index}/${total}]`)} ${bold(q.prompt)}${q.required ? red(' *') : ''}`);
-    if (q.choices) describeChoices(q).forEach((l) => say(l));
+    const menu = menus ? menuFor(q, session.answers, draft ?? q.default) : undefined;
+    if (menu) {
+      if (q.example) say(dim(`  e.g. ${q.example}`));
+      const result = await runMenu(reader, menu);
+      if (result.action === 'back') {
+        if (session.back()) lastSection = '';
+        continue;
+      }
+      if (result.action === 'help') {
+        say(dim(`  ${q.help ?? 'No extra help for this one.'}`));
+        continue;
+      }
+      let outcome;
+      if (result.action === 'skip') outcome = draft !== undefined ? session.answer(draft) : session.skip();
+      else if (result.action === 'submit') outcome = session.answer(q.type === 'scale' ? Number(result.value) : result.value);
+      else {
+        const typed = await reader.ask(cyan('  Type your own: '));
+        if (typed === null) continue;
+        const value = q.type === 'multiselect' ? [...result.picked, ...typed.split(',')].join(',') : typed;
+        outcome = session.answerText(value);
+      }
+      if (!outcome.ok) say(red(`  ${outcome.error}`));
+      else say(`${cyan('›')} ${showChosen(q, session.answers[q.id])}`);
+      continue;
+    }
+
+    if (q.choices && q.type !== 'rank') describeChoices(q).forEach((l) => say(l));
+    if (q.type === 'scale') describeScale(q).forEach((l) => say(l));
+    if (q.type === 'rank') describeRank(rankItems(q, session.answers)).forEach((l) => say(l));
     if (q.type === 'list') say(dim('  One per line. Empty line when done.'));
     if (q.example) say(dim(`  e.g. ${q.example}`));
     if (draft !== undefined) say(dim(`  Enter to keep: ${showValue(draft)}`));
@@ -260,6 +428,42 @@ interface Flags {
   yes?: boolean;
   link?: boolean;
   'link-to'?: string;
+  config?: string;
+  plain?: boolean;
+}
+
+const CONFIG_FILES = ['.lowdownrc.json', '.lowdownrc', 'lowdown.config.json'];
+
+interface Loaded {
+  config: LowdownConfig;
+  file?: string;
+  questions: Question[];
+  sections: Section[];
+  answers: Answers;
+}
+
+function loadConfig(flags: Flags): Loaded {
+  const file = flags.config ?? CONFIG_FILES.find((f) => existsSync(f));
+  if (flags.config && !existsSync(flags.config)) throw new Error(`Config file ${flags.config} not found.`);
+  const config = (file ? readJSON(file) : {}) as LowdownConfig;
+  const errors = validateConfig(config);
+  if (errors.length) throw new Error(`${file}:\n  ${errors.join('\n  ')}`);
+  return { config, file, ...applyConfig(config) };
+}
+
+/** Command-line flags win over the config file. */
+function withConfig(flags: Flags, config: LowdownConfig): Flags {
+  const link = config.link;
+  return {
+    ...flags,
+    out: flags.out ?? config.out,
+    format: flags.format ?? config.format,
+    quick: flags.quick || config.quick,
+    link: flags.link || link === true || Array.isArray(link),
+    'link-to': flags['link-to'] ?? (Array.isArray(link) ? link.join(',') : undefined),
+    'no-instructions': flags['no-instructions'] || config.instructions === false,
+    'no-checklist': flags['no-checklist'] || config.checklist === false,
+  };
 }
 
 const wantsLink = (flags: Flags) => Boolean(flags.link || flags['link-to']);
@@ -274,8 +478,8 @@ function runLink(brief: string, flags: Flags): LinkResult[] {
   return results;
 }
 
-function renderOpts(flags: Flags): RenderOptions {
-  return { instructions: !flags['no-instructions'], checklist: !flags['no-checklist'] };
+function renderOpts(flags: Flags, sections?: Section[]): RenderOptions {
+  return { instructions: !flags['no-instructions'], checklist: !flags['no-checklist'], sections };
 }
 
 function emit(content: string, out: string | undefined) {
@@ -283,19 +487,23 @@ function emit(content: string, out: string | undefined) {
   else writeFileSync(out, content);
 }
 
-async function runInit(flags: Flags) {
+async function runInit(rawFlags: Flags) {
+  const loaded = loadConfig(rawFlags);
+  const flags = withConfig(rawFlags, loaded.config);
   const out = flags.out ?? 'BRIEF.md';
   const format = formatFor(out, flags.format);
   if (flags['link-to']) parseLinkTargets(flags['link-to']); // fail before the interview, not after
-  const prefill = flags.answers ? (readJSON(flags.answers) as Answers) : undefined;
-  const session = new BriefSession({ questions: DEFAULT_QUESTIONS, quick: flags.quick, answers: prefill });
+  const prefill = { ...loaded.answers, ...(flags.answers ? (readJSON(flags.answers) as Answers) : {}) };
+  const session = new BriefSession({ questions: loaded.questions, sections: loaded.sections, quick: flags.quick, answers: prefill });
   const reader = new LineReader();
+  const menus = reader.terminal && !flags.plain && typeof process.stdin.setRawMode === 'function';
 
   try {
     say(bold('the-lowdown') + dim(' · a few minutes now saves a lot of agent rework'));
     say(dim('Enter skips optional questions · "<" goes back · "?" explains · Ctrl+C quits'));
+    if (loaded.file) say(dim(`Using ${loaded.file}`));
 
-    const done = await interview(session, reader);
+    const done = await interview(session, reader, menus);
     if (!done) {
       const missing = session.missingRequired().map((q) => q.id).join(', ');
       throw new Error(`Input ended before the required questions were answered (${missing}).`);
@@ -318,7 +526,7 @@ async function runInit(flags: Flags) {
       return;
     }
 
-    emit(renderBrief(brief, format, renderOpts(flags)), out);
+    emit(renderBrief(brief, format, renderOpts(flags, session.sections)), out);
     if (flags['save-answers']) {
       writeFileSync(flags['save-answers'], JSON.stringify(session.answers, null, 2) + '\n');
     }
@@ -334,10 +542,12 @@ async function runInit(flags: Flags) {
   }
 }
 
-function runRender(file: string | undefined, flags: Flags) {
+function runRender(file: string | undefined, rawFlags: Flags) {
   if (!file) throw new Error('Usage: the-lowdown render <answers-or-brief.json> [-o file] [-f format]');
-  const brief = loadBrief(file);
-  emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags)), flags.out);
+  const loaded = loadConfig(rawFlags);
+  const flags = { ...withConfig(rawFlags, loaded.config), out: rawFlags.out }; // render prints to stdout unless -o
+  const brief = loadBrief(file, loaded.questions);
+  emit(renderBrief(brief, formatFor(flags.out, flags.format), renderOpts(flags, loaded.sections)), flags.out);
   if (flags.out && flags.out !== '-') {
     say(green(`✓ Wrote ${flags.out}`));
     if (wantsLink(flags)) runLink(flags.out, flags);
@@ -346,9 +556,9 @@ function runRender(file: string | undefined, flags: Flags) {
   }
 }
 
-function runLint(file: string | undefined): number {
+function runLint(file: string | undefined, flags: Flags): number {
   if (!file) throw new Error('Usage: the-lowdown lint <answers-or-brief.json>');
-  const issues = lintBrief(loadBrief(file));
+  const issues = lintBrief(loadBrief(file, loadConfig(flags).questions));
   printIssues(issues);
   return issues.some((i) => i.level === 'warn') ? 1 : 0;
 }
@@ -368,6 +578,8 @@ async function main(argv: string[]): Promise<number> {
       yes: { type: 'boolean', short: 'y' },
       link: { type: 'boolean' },
       'link-to': { type: 'string' },
+      config: { type: 'string' },
+      plain: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -392,16 +604,18 @@ async function main(argv: string[]): Promise<number> {
       runRender(arg, flags);
       return 0;
     case 'lint':
-      return runLint(arg);
+      return runLint(arg, flags);
     case 'link': {
       const brief = arg ?? 'BRIEF.md';
       if (!existsSync(brief)) throw new Error(`${brief} not found. Run the-lowdown first, or pass the brief's path.`);
       runLink(brief, flags);
       return 0;
     }
-    case 'questions':
-      emit(JSON.stringify(questionsToJSON(), null, 2) + '\n', flags.out);
+    case 'questions': {
+      const loaded = loadConfig(flags);
+      emit(JSON.stringify(questionsToJSON(loaded.questions, loaded.sections), null, 2) + '\n', flags.out);
       return 0;
+    }
     default:
       throw new Error(`Unknown command "${command}". Run the-lowdown --help.`);
   }

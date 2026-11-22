@@ -67,7 +67,7 @@ describe('BriefSession', () => {
   });
 
   it('applies defaults on skip', () => {
-    const s = new BriefSession({ answers: { name: 'x', summary: 'y', kind: 'web-app', fidelity: 'sketch', primaryUsers: 'z', userContext: 'c' } });
+    const s = new BriefSession({ answers: { name: 'x', summary: 'y', kind: 'web-app', fidelity: 'sketch', keyFlows: ['Book'], primaryUsers: 'z', userContext: 'c', secondaryUsers: ['Staff'] } });
     assert.equal(s.current()?.id, 'accessibility');
     s.skip();
     assert.deepEqual(s.answers.accessibility, ['WCAG 2.2 AA']);
@@ -202,6 +202,7 @@ describe('cli', () => {
       'A small tool that helps teams write better briefs for agents.', // summary
       '1', // kind
       '2', // fidelity
+      '', // key flows (web app specifics, skip)
       'Product designers new to AI agents', // users
       '', // context (skip)
       'Writes a brief in under 5 minutes', '', // goals
@@ -335,5 +336,231 @@ describe('share links', () => {
   it('keeps the main entry free of Node built-ins', () => {
     const src = readFileSync(fileURLToPath(new URL('./index.js', import.meta.url)), 'utf8');
     assert.doesNotMatch(src, /from ['"]node:|\.\/link\.js|\.\/cli\.js/);
+  });
+});
+
+// ── Interview and questions ──────────────────────────────────
+
+import { renderToString } from 'react-dom/server';
+import { createElement } from 'react';
+import { applyConfig, matchesCondition, parseReference, rankItems, validateConfig } from './index.js';
+import { createMenu, menuReducer, renderMenu } from './menu.js';
+import { LowdownForm } from './react.js';
+
+describe('scale and rank questions', () => {
+  const scale: Question = { id: 'density', section: 'x', type: 'scale', prompt: 'How dense?', min: 1, max: 5, minLabel: 'Spacious', maxLabel: 'Dense' };
+  const rank: Question = { id: 'order', section: 'x', type: 'rank', rankFrom: 'goals', prompt: 'Order them' };
+
+  it('parses and validates scale answers', () => {
+    assert.equal(parseInput(scale, '4'), 4);
+    const s = new BriefSession({ questions: [scale] });
+    assert.equal(s.answerText('9').ok, false);
+    assert.equal(s.answerText('three').ok, false);
+    assert.ok(s.answerText('2').ok);
+    assert.equal(s.answers.density, 2);
+  });
+
+  it('ranks the items of another answer, by number or text, keeping unranked items last', () => {
+    const answers = { goals: ['Fast', 'Accurate', 'Delightful'] };
+    assert.deepEqual(rankItems(rank, answers), ['Fast', 'Accurate', 'Delightful']);
+    assert.deepEqual(parseInput(rank, '2,3', answers), ['Accurate', 'Delightful', 'Fast']);
+    assert.deepEqual(parseInput(rank, 'delightful', answers), ['Delightful', 'Fast', 'Accurate']);
+  });
+
+  it('asks for a goal ranking only with two or more goals, and renders it numbered', () => {
+    const one = new BriefSession({ answers: { ...answers } });
+    assert.ok(!one.applicable().some((q) => q.id === 'goalPriority'));
+    const two = { ...answers, goals: ['Book in under 60 seconds', 'Fewer support tickets'], goalPriority: '2' };
+    assert.ok(new BriefSession({ answers: two }).applicable().some((q) => q.id === 'goalPriority'));
+    const b = buildBrief({ ...two, goalPriority: ['Fewer support tickets'] }, { now: NOW });
+    assert.equal(b.goals.ranked, true);
+    assert.deepEqual(b.goals.successCriteria, ['Fewer support tickets', 'Book in under 60 seconds']);
+    assert.match(renderBrief(b), /in priority order[\s\S]*1\. Fewer support tickets\n2\. Book in under 60 seconds/);
+  });
+});
+
+describe('project-type questions', () => {
+  it('asks dashboard questions only for dashboards', () => {
+    const ids = (kind: string) => new BriefSession({ answers: { ...answers, kind } }).applicable().filter((q) => q.section === 'specifics').map((q) => q.id);
+    assert.deepEqual(ids('dashboard'), ['keyMetrics', 'dataDensity', 'freshness']);
+    assert.deepEqual(ids('marketing-site'), ['conversionGoal', 'trafficSource', 'proofPoints']);
+    assert.deepEqual(ids('Something custom'), []);
+  });
+
+  it('renders specifics with readable values and adds them to the definition of done', () => {
+    const b = buildBrief({ ...answers, kind: 'dashboard', keyMetrics: 'Weekly bookings; No-show rate', dataDensity: 4, freshness: 'daily' }, { now: NOW });
+    assert.deepEqual(b.specifics?.map((x) => x.id), ['keyMetrics', 'dataDensity', 'freshness']);
+    const md = renderBrief(b);
+    assert.match(md, /## Project specifics \(Dashboard \/ data UI\)/);
+    assert.match(md, /\*\*How dense should it be:\*\* 4 of 5 \(1 = Spacious, 5 = Dense\)/);
+    assert.match(md, /\*\*How fresh is the data:\*\* Daily/);
+    assert.match(md, /- \[ \] The key metrics are visible without scrolling/);
+    assert.match(renderBrief(b, 'prompt'), /<project_specifics>[\s\S]*Which numbers matter most: Weekly bookings, No-show rate/);
+  });
+
+  it('nudges when a marketing page has no conversion goal', () => {
+    const b = buildBrief({ ...answers, kind: 'marketing-site' }, { now: NOW });
+    assert.ok(lintBrief(b).some((i) => i.field === 'specifics.conversionGoal'));
+  });
+});
+
+describe('new brief fields', () => {
+  const full = {
+    ...answers,
+    secondaryUsers: ['Clinic staff who confirm bookings'],
+    content: 'none',
+    brandAssets: ['Logo: brand.example.com/logo.svg'],
+    crossCutting: ['Dark mode', 'Localization'],
+    references: ['Headspace — the calm pacing', 'Linear'],
+  };
+
+  it('renders secondary users, content, brand assets, cross-cutting needs and references', () => {
+    const md = renderBrief(buildBrief(full, { now: NOW }));
+    assert.match(md, /Also used by[\s\S]*- Clinic staff who confirm bookings/);
+    assert.match(md, /\*\*Content \(No content yet\):\*\* Write realistic placeholder copy/);
+    assert.match(md, /\*\*Brand assets:\*\*\n\n- Logo: brand\.example\.com\/logo\.svg/);
+    assert.match(md, /\*\*Applies everywhere \(must\):\*\*\n\n- Dark mode\n- Localization/);
+    assert.match(md, /- \*\*Headspace:\*\* borrow the calm pacing\n- Linear/);
+    assert.match(md, /- \[ \] Supports: Dark mode/);
+    assert.match(md, /- \[ \] No lorem ipsum/);
+  });
+
+  it('parses references and flags ones without anything to borrow', () => {
+    assert.deepEqual(parseReference('Linear: the density'), { name: 'Linear', borrow: 'the density' });
+    assert.deepEqual(parseReference('Stripe – clear pricing'), { name: 'Stripe', borrow: 'clear pricing' });
+    assert.deepEqual(parseReference('Notion'), { name: 'Notion' });
+    const tips = lintBrief(buildBrief(full, { now: NOW })).filter((i) => i.field === 'tone.references');
+    assert.equal(tips.length, 1);
+    assert.match(tips[0]!.message, /Linear/);
+  });
+
+  it('still renders briefs saved before these fields existed', () => {
+    const b = buildBrief(answers, { now: NOW }) as unknown as Record<string, any>;
+    delete b.specifics; delete b.users.secondary; delete b.constraints.brandAssets; delete b.constraints.crossCutting;
+    assert.doesNotThrow(() => renderBrief(b as never));
+    assert.doesNotThrow(() => lintBrief(b as never));
+  });
+});
+
+describe('conditions', () => {
+  it('matches values, lists, alternatives and "answered"', () => {
+    assert.ok(matchesCondition({ kind: 'dashboard' }, { kind: 'Dashboard' }));
+    assert.ok(matchesCondition({ kind: ['web-app', 'dashboard'] }, { kind: 'dashboard' }));
+    assert.ok(matchesCondition({ crossCutting: 'Dark mode' }, { crossCutting: ['Dark mode', 'Localization'] }));
+    assert.ok(matchesCondition({ stack: '*' }, { stack: 'React' }));
+    assert.ok(!matchesCondition({ stack: '*' }, {}));
+    assert.ok(matchesCondition({ hasBrand: true }, { hasBrand: true }));
+    assert.ok(!matchesCondition({ hasBrand: true }, { hasBrand: false }));
+    assert.ok(!matchesCondition({ kind: 'dashboard' }, { kind: 'web-app' }));
+  });
+});
+
+describe('team config', () => {
+  const config = {
+    defaults: { platforms: ['Mobile web'] },
+    answers: { stack: 'React + @acme/ui' },
+    skip: ['references'],
+    overrides: {
+      primaryUsers: { prompt: '¿Quién es el usuario principal?' },
+      fidelity: { choiceLabels: { sketch: 'Boceto' } },
+    },
+    sections: { tone: 'Look and feel', brand: { title: 'Brand', intro: 'Your brand' } },
+    questions: [
+      { id: 'hasBrand', section: 'brand', type: 'confirm' as const, prompt: 'Existing brand?' },
+      { id: 'brandUrl', section: 'brand', type: 'text' as const, prompt: 'Brand guidelines URL', condition: { hasBrand: true } },
+      { id: 'owner', section: 'project', type: 'text' as const, prompt: 'Who signs off?', after: 'name' },
+    ],
+  };
+
+  it('validates', () => {
+    assert.deepEqual(validateConfig(config), []);
+    const errs = validateConfig({ skip: ['name', 'nope'], overrides: { ghost: {} }, questions: [{ id: 'name', section: 'x', type: 'text', prompt: 'Dup' }, { id: 'z', section: 'x', type: 'wat', prompt: 'p' }] });
+    assert.ok(errs.some((e) => /"name" is required/.test(e)));
+    assert.ok(errs.some((e) => /no question has the id "nope"/.test(e)));
+    assert.ok(errs.some((e) => /overrides\.ghost/.test(e)));
+    assert.ok(errs.some((e) => /id "name" is already used/.test(e)));
+    assert.ok(errs.some((e) => /type must be one of/.test(e)));
+  });
+
+  it('rewords, adds, skips, defaults and pre-answers questions', () => {
+    const { questions, sections, answers: fixed } = applyConfig(config);
+    const ids = questions.map((q) => q.id);
+    assert.equal(ids[ids.indexOf('name') + 1], 'owner');
+    assert.ok(!ids.includes('references'));
+    assert.equal(questions.find((q) => q.id === 'primaryUsers')!.prompt, '¿Quién es el usuario principal?');
+    assert.equal(questions.find((q) => q.id === 'fidelity')!.choices![0]!.label, 'Boceto');
+    assert.deepEqual(questions.find((q) => q.id === 'platforms')!.default, ['Mobile web']);
+    assert.equal(sections.find((x) => x.id === 'tone')!.title, 'Look and feel');
+    assert.equal(sections.find((x) => x.id === 'brand')!.intro, 'Your brand');
+    const s = new BriefSession({ questions, sections, answers: { ...answers, ...fixed, hasBrand: false } });
+    assert.ok(!s.applicable().some((q) => q.id === 'brandUrl'));
+    assert.ok(!s.applicable().some((q) => q.id === 'stack' && !(q.id in s.answers)));
+  });
+
+  it('is picked up by the CLI from .lowdownrc.json', () => {
+    const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+    const cwd = mkdtempSync(join(tmpdir(), 'the-lowdown-rc-'));
+    writeFileSync(join(cwd, '.lowdownrc.json'), JSON.stringify({ quick: true, out: 'docs-brief.md', answers: { stack: 'React' }, questions: [{ id: 'owner', section: 'project', type: 'text', prompt: 'Who signs off', after: 'summary', quick: true }] }));
+    const input = ['Demo', 'A small tool for writing briefs for agents.', 'Anna', '1', '2', '', 'Designers', '', 'Writes a brief in 5 minutes', '', 'Generate', '', '6', 'y'].join('\n');
+    const r = spawnSync(process.execPath, [cli], { cwd, input, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /Using \.lowdownrc\.json/);
+    const md = readFileSync(join(cwd, 'docs-brief.md'), 'utf8');
+    assert.match(md, /\*\*Who signs off:\*\* Anna/);
+    assert.match(md, /\*\*Stack \/ design system:\*\* React/);
+  });
+});
+
+describe('arrow-key menu', () => {
+  const items = [{ value: 'a', label: 'Alpha' }, { value: 'b', label: 'Beta' }, { value: 'c', label: 'Gamma' }];
+
+  it('single: moves, wraps and submits the highlighted item', () => {
+    let s = createMenu({ mode: 'single', items });
+    s = menuReducer(s, { name: 'up' }).state; // wraps to last
+    assert.equal(s.cursor, 2);
+    const r = menuReducer(menuReducer(s, { name: 'down' }).state, { name: 'enter' });
+    assert.deepEqual(r.result, { action: 'submit', value: 'a' });
+  });
+
+  it('multi: toggles with space, respects max and submits in item order', () => {
+    let s = createMenu({ mode: 'multi', items, max: 2 });
+    for (const d of [3, 1, 2]) s = menuReducer(s, { name: 'digit', digit: d }).state;
+    assert.deepEqual(s.picked, ['c', 'a']);
+    assert.equal(s.note, 'Pick at most 2.');
+    assert.deepEqual(menuReducer(s, { name: 'enter' }).result, { action: 'submit', value: ['a', 'c'] });
+  });
+
+  it('order: picks in priority order and shows the numbers', () => {
+    let s = createMenu({ mode: 'order', items });
+    s = menuReducer(s, { name: 'digit', digit: 3 }).state;
+    s = menuReducer(s, { name: 'digit', digit: 1 }).state;
+    assert.match(renderMenu(s).join('\n'), / 2 Alpha[\s\S]* 1 Gamma/);
+    assert.deepEqual(menuReducer(s, { name: 'enter' }).result, { action: 'submit', value: ['c', 'a'] });
+  });
+
+  it('offers skip, type-your-own, back and help', () => {
+    let s = createMenu({ mode: 'single', items, optional: true, allowOther: true });
+    assert.equal(renderMenu(s).filter((l) => /Type your own|Skip/.test(l)).length, 2);
+    s = menuReducer(s, { name: 'end' }).state;
+    assert.deepEqual(menuReducer(s, { name: 'enter' }).result, { action: 'skip' });
+    s = menuReducer(s, { name: 'up' }).state;
+    assert.equal(menuReducer(s, { name: 'enter' }).result?.action, 'other');
+    assert.deepEqual(menuReducer(s, { name: 'back' }).result, { action: 'back' });
+    const req = createMenu({ mode: 'multi', items });
+    assert.match(menuReducer(req, { name: 'enter' }).state.note ?? '', /at least one/);
+  });
+});
+
+describe('react form: new question types', () => {
+  it('renders scale and rank fields', () => {
+    const scaleHtml = renderToString(createElement(LowdownForm, { questions: [{ id: 'd', section: 'x', type: 'scale', prompt: 'How dense?', minLabel: 'Spacious', maxLabel: 'Dense' }] }));
+    assert.match(scaleHtml, /role="radiogroup"/);
+    assert.match(scaleHtml, /aria-label="1, Spacious"/);
+    const rankHtml = renderToString(createElement(LowdownForm, {
+      questions: [{ id: 'goals', section: 'g', type: 'list', prompt: 'Goals' }, { id: 'p', section: 'g', type: 'rank', rankFrom: 'goals', prompt: 'Order' }],
+      initialAnswers: { goals: ['Fast', 'Clear'] },
+    }));
+    assert.match(rankHtml, /Move “Fast” down/);
+    assert.match(rankHtml, /Move “Clear” up/);
   });
 });

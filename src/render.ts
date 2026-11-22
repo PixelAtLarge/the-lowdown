@@ -1,4 +1,5 @@
 import { SECTIONS, TONE_GUIDANCE } from './questions.js';
+import { parseReference } from './brief.js';
 import { titleCase } from './session.js';
 import type { AnswerValue, Brief, OutputFormat, Section } from './types.js';
 
@@ -20,6 +21,18 @@ export const FIDELITY_GUIDANCE: Record<string, { label: string; guidance: string
   },
 };
 
+export const CONTENT_GUIDANCE: Record<string, { label: string; guidance: string }> = {
+  real: { label: 'Real content', guidance: 'Use the real content provided, word for word. Do not rewrite approved copy.' },
+  some: {
+    label: 'Some real content',
+    guidance: 'Use real content where it is provided. Elsewhere write realistic placeholders and mark them as placeholders. Never lorem ipsum.',
+  },
+  none: {
+    label: 'No content yet',
+    guidance: 'Write realistic placeholder copy in the brief\'s tone. Never lorem ipsum, and never invent statistics, quotes or customer names.',
+  },
+};
+
 export const AGENT_INSTRUCTIONS =
   'You are working from this brief. Treat "Must" items as hard requirements and "Out of scope" as do-not-build. ' +
   'When the brief is silent, choose whatever best serves the primary user and the primary action, ' +
@@ -36,7 +49,14 @@ export interface RenderOptions {
 }
 
 const fmtValue = (v: AnswerValue): string =>
-  typeof v === 'boolean' ? (v ? 'Yes' : 'No') : Array.isArray(v) ? v.join(', ') : v;
+  typeof v === 'boolean' ? (v ? 'Yes' : 'No') : Array.isArray(v) ? v.join(', ') : String(v);
+
+const fmtReference = (r: string, md: boolean) => {
+  const { name, borrow } = parseReference(r);
+  return borrow ? (md ? `**${name}:** borrow ${borrow}` : `${name}: borrow ${borrow}`) : name;
+};
+
+const specific = (b: Brief, id: string) => b.specifics?.find((x) => x.id === id)?.value;
 
 const toneLabel = (t: string) => TONE_GUIDANCE[t.toLowerCase()]?.label ?? t;
 
@@ -44,6 +64,12 @@ function definitionOfDone(b: Brief): string[] {
   const items = [...b.goals.successCriteria];
   if (b.goals.primaryAction) items.push(`"${b.goals.primaryAction}" is the most prominent action on the main screen`);
   for (const a of b.users.accessibility) items.push(`Meets: ${a}`);
+  for (const c of b.constraints.crossCutting ?? []) items.push(`Supports: ${c}`);
+  if (specific(b, 'keyFlows')) items.push('Each key flow works end to end');
+  if (specific(b, 'keyMetrics')) items.push('The key metrics are visible without scrolling');
+  const goal = specific(b, 'conversionGoal');
+  if (goal) items.push(`Every section leads toward: ${fmtValue(goal)}`);
+  if (b.constraints.content === 'none' || b.constraints.content === 'some') items.push('No lorem ipsum, and no invented facts, quotes or names');
   if (b.constraints.platforms.length) items.push(`Works on ${b.constraints.platforms.join(', ')}`);
   for (const m of b.constraints.mustInclude) items.push(`Includes: ${m}`);
   if (b.constraints.mustAvoid.length) items.push('Nothing on the must-avoid list appears');
@@ -104,17 +130,35 @@ export function toMarkdown(b: Brief, opts: RenderOptions = {}): string {
   field('Their situation', b.users.context);
   extras('users');
   line();
+  block('Also used by (support them, but design for the primary user)', b.users.secondary ?? []);
   block('Accessibility (must)', b.users.accessibility);
 
   line('## Goals');
   line();
-  block('Success looks like', b.goals.successCriteria);
+  if (b.goals.ranked) {
+    line('**Success looks like** (in priority order; when two conflict, the higher one wins):');
+    line();
+    b.goals.successCriteria.forEach((g, i) => line(`${i + 1}. ${g}`));
+    line();
+  } else {
+    block('Success looks like', b.goals.successCriteria);
+  }
   if (b.goals.primaryAction) {
     line(`**Primary action:** ${b.goals.primaryAction}. Give it the strongest visual weight on the main screen.`);
     line();
   }
   block('Out of scope (do not build)', b.goals.nonGoals);
   extras('goals');
+
+  if (b.specifics?.length) {
+    line(`## Project specifics${b.project.kind ? ` (${b.project.kind})` : ''}`);
+    line();
+    for (const s of b.specifics) {
+      if (Array.isArray(s.value) && s.value.length > 1) block(s.label, s.value);
+      else field(s.label, fmtValue(s.value));
+    }
+    line();
+  }
 
   line('## Constraints');
   line();
@@ -123,8 +167,12 @@ export function toMarkdown(b: Brief, opts: RenderOptions = {}): string {
   else if (b.project.fidelity) field('Fidelity', b.project.fidelity);
   if (b.constraints.platforms.length) field('Platforms', b.constraints.platforms.join(', '));
   field('Stack / design system', b.constraints.stack);
+  const content = b.constraints.content ? CONTENT_GUIDANCE[b.constraints.content] : undefined;
+  if (content) field(`Content (${content.label})`, content.guidance);
   extras('constraints');
   line();
+  block('Brand assets', b.constraints.brandAssets ?? []);
+  block('Applies everywhere (must)', b.constraints.crossCutting ?? []);
   block('Must include', b.constraints.mustInclude);
   block('Must avoid', b.constraints.mustAvoid);
 
@@ -140,7 +188,7 @@ export function toMarkdown(b: Brief, opts: RenderOptions = {}): string {
       }
       if (b.tone.traits.some((t) => TONE_GUIDANCE[t.toLowerCase()])) line();
     }
-    block('References', b.tone.references);
+    block('References', b.tone.references.map((r) => fmtReference(r, true)));
     field('Must never feel like', b.tone.avoid);
     extras('tone');
     if (b.tone.avoid || extrasFor(b, 'tone').length) line();
@@ -191,18 +239,25 @@ export function toPrompt(b: Brief, opts: RenderOptions = {}): string {
   tag('users', [
     `Primary user: ${b.users.primary}`,
     b.users.context && `Situation: ${b.users.context}`,
+    bullets('Also used by (support them, design for the primary user)', b.users.secondary ?? []),
     bullets('Accessibility (must)', b.users.accessibility),
     ...extras('users'),
   ]);
   tag('goals', [
-    bullets('Success looks like', b.goals.successCriteria),
+    b.goals.ranked
+      ? `Success looks like (priority order; higher wins a conflict):\n${b.goals.successCriteria.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
+      : bullets('Success looks like', b.goals.successCriteria),
     b.goals.primaryAction && `Primary action (strongest visual weight): ${b.goals.primaryAction}`,
     bullets('Out of scope (do not build)', b.goals.nonGoals),
     ...extras('goals'),
   ]);
+  tag('project_specifics', (b.specifics ?? []).map((s) => `${s.label}: ${fmtValue(s.value)}`));
   tag('constraints', [
     b.constraints.platforms.length > 0 && `Platforms: ${b.constraints.platforms.join(', ')}`,
     b.constraints.stack && `Stack / design system: ${b.constraints.stack}`,
+    b.constraints.content && CONTENT_GUIDANCE[b.constraints.content] && `Content: ${CONTENT_GUIDANCE[b.constraints.content]!.guidance}`,
+    bullets('Brand assets', b.constraints.brandAssets ?? []),
+    bullets('Applies everywhere (must)', b.constraints.crossCutting ?? []),
     bullets('Must include', b.constraints.mustInclude),
     bullets('Must avoid', b.constraints.mustAvoid),
     ...extras('constraints'),
@@ -212,7 +267,7 @@ export function toPrompt(b: Brief, opts: RenderOptions = {}): string {
       const g = TONE_GUIDANCE[t.toLowerCase()];
       return g ? `${g.label}. Do: ${g.do} Avoid: ${g.avoid}` : t;
     }),
-    b.tone.references.length > 0 && `References: ${b.tone.references.join('; ')}`,
+    b.tone.references.length > 0 && `References: ${b.tone.references.map((r) => fmtReference(r, false)).join('; ')}`,
     b.tone.avoid && `Must never feel like: ${b.tone.avoid}`,
     ...extras('tone'),
   ]);

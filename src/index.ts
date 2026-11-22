@@ -4,12 +4,14 @@ export type {
   Brief,
   BuiltInSection,
   Choice,
+  Condition,
   ExtraField,
   LintIssue,
   LintLevel,
   OutputFormat,
   Question,
   QuestionType,
+  Reference,
   Section,
   SectionId,
 } from './types.js';
@@ -20,13 +22,25 @@ export {
   SECTIONS,
   TONE_GUIDANCE,
   TONE_TENSIONS,
+  projectLabel,
 } from './questions.js';
-export { isEmpty, normalizeAnswer, parseInput, validateAnswer } from './answers.js';
+export {
+  isApplicable,
+  isEmpty,
+  matchesCondition,
+  normalizeAnswer,
+  parseInput,
+  rankItems,
+  scaleRange,
+  validateAnswer,
+} from './answers.js';
+export { applyConfig, validateConfig, type ConfigQuestion, type LowdownConfig, type QuestionOverride } from './config.js';
 export { BriefSession, type AnswerResult, type SessionOptions } from './session.js';
-export { buildBrief, isBrief, type BuildOptions } from './brief.js';
+export { buildBrief, isBrief, parseReference, type BuildOptions } from './brief.js';
 export { lintBrief } from './lint.js';
 export {
   AGENT_INSTRUCTIONS,
+  CONTENT_GUIDANCE,
   FIDELITY_GUIDANCE,
   renderBrief,
   toJSON,

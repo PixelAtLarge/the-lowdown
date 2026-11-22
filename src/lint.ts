@@ -1,4 +1,5 @@
 import { TONE_TENSIONS } from './questions.js';
+import { parseReference } from './brief.js';
 import type { Brief, LintIssue } from './types.js';
 
 const BROAD_USERS =
@@ -44,6 +45,9 @@ export function lintBrief(brief: Brief): LintIssue[] {
   if (brief.goals.successCriteria.length && !brief.goals.successCriteria.some((g) => MEASURABLE.test(g))) {
     add('info', 'goals.successCriteria', 'None of the goals are measurable. Adding a number or threshold gives the agent something to check against.');
   }
+  if (brief.goals.successCriteria.length > 2 && !brief.goals.ranked) {
+    add('info', 'goals.successCriteria', 'Rank your goals so the agent knows which one wins when they conflict.');
+  }
   if (!brief.goals.nonGoals.length) {
     add('info', 'goals.nonGoals', 'No out-of-scope items. Agents tend to over-build; listing even one or two helps.');
   }
@@ -62,7 +66,21 @@ export function lintBrief(brief: Brief): LintIssue[] {
     }
   }
 
+  // Project specifics
+  const kind = (brief.project.kind ?? '').toLowerCase();
+  const has = (id: string) => brief.specifics?.some((x) => x.id === id);
+  if (kind.includes('marketing') && !has('conversionGoal')) {
+    add('info', 'specifics.conversionGoal', 'A marketing page with no conversion goal tends to become a feature list. What should a visitor do?');
+  }
+  if (kind.includes('dashboard') && !has('keyMetrics')) {
+    add('info', 'specifics.keyMetrics', 'Name the numbers that matter most, or every chart gets equal weight.');
+  }
+
   // Tone
+  const vague = brief.tone.references.map(parseReference).filter((r) => !r.borrow);
+  if (vague.length) {
+    add('info', 'tone.references', `Say what to borrow from ${vague.map((r) => r.name).join(', ')} (e.g. "${vague[0]!.name} — the pacing"), or the agent may copy it wholesale.`);
+  }
   const traits = brief.tone.traits.map((t) => t.toLowerCase());
   if (!traits.length) {
     add('info', 'tone.traits', 'No tone words. The agent will fall back to generic defaults.');

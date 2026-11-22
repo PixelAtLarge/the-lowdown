@@ -2,6 +2,7 @@ import type { Choice, Question, Section } from './types.js';
 
 export const SECTIONS: Section[] = [
   { id: 'project', title: 'Project', intro: 'What are we making?' },
+  { id: 'specifics', title: 'Specifics', intro: 'A few questions for this kind of project' },
   { id: 'users', title: 'Users', intro: 'Who is it for, and what are they trying to do?' },
   { id: 'goals', title: 'Goals', intro: 'What does success look like, and what is out of scope?' },
   { id: 'constraints', title: 'Constraints', intro: 'What must the agent work within?' },
@@ -147,6 +148,9 @@ export const DEFAULT_QUESTIONS: Question[] = [
     ],
   },
 
+  // ── Specifics: asked only for the matching kind of project ──
+  ...projectSpecifics(),
+
   // ── Users ──────────────────────────────────────────────────
   {
     id: 'primaryUsers',
@@ -164,6 +168,14 @@ export const DEFAULT_QUESTIONS: Question[] = [
     prompt: 'What are they trying to get done, and in what situation?',
     example: 'Find an open slot this week and book it in under a minute, often one-handed.',
     quick: true,
+  },
+  {
+    id: 'secondaryUsers',
+    section: 'users',
+    type: 'list',
+    prompt: 'Anyone else who uses it?',
+    help: 'Secondary users get supporting paths, never the main screen.',
+    example: 'Clinic staff who confirm bookings',
   },
   {
     id: 'accessibility',
@@ -184,6 +196,15 @@ export const DEFAULT_QUESTIONS: Question[] = [
     help: 'One per line. Observable outcomes beat adjectives.',
     example: 'A new member books a session in under 60 seconds',
     required: true,
+  },
+  {
+    id: 'goalPriority',
+    section: 'goals',
+    type: 'rank',
+    rankFrom: 'goals',
+    prompt: 'Put your goals in order. Which wins when they conflict?',
+    help: 'Agents trade goals off constantly. The order tells them how.',
+    when: (a) => Array.isArray(a.goals) && a.goals.length > 1,
   },
   {
     id: 'primaryAction',
@@ -228,6 +249,39 @@ export const DEFAULT_QUESTIONS: Question[] = [
     quick: true,
   },
   {
+    id: 'content',
+    section: 'constraints',
+    type: 'select',
+    prompt: 'Is real content available?',
+    help: 'Stops lorem ipsum, and stops the agent rewriting copy you have already approved.',
+    choices: [
+      { value: 'real', label: 'Real content', hint: 'use what is provided, word for word' },
+      { value: 'some', label: 'Some real content', hint: 'realistic placeholders for the rest' },
+      { value: 'none', label: 'No content yet', hint: 'write realistic placeholder copy' },
+    ],
+  },
+  {
+    id: 'brandAssets',
+    section: 'constraints',
+    type: 'list',
+    prompt: 'Links to brand assets (logo, colors, fonts)?',
+    example: 'Logo: brand.acme.com/logo.svg; Colors: #1E4D36, #EAC26C; Font: Manrope',
+  },
+  {
+    id: 'crossCutting',
+    section: 'constraints',
+    type: 'multiselect',
+    prompt: 'Anything that applies everywhere?',
+    allowOther: true,
+    choices: [
+      { value: 'Dark mode', label: 'Dark mode' },
+      { value: 'Localization', label: 'Localization / translation' },
+      { value: 'Right-to-left languages', label: 'Right-to-left languages' },
+      { value: 'Works offline', label: 'Works offline' },
+      { value: 'Print-friendly', label: 'Print-friendly' },
+    ],
+  },
+  {
     id: 'mustInclude',
     section: 'constraints',
     type: 'list',
@@ -258,8 +312,9 @@ export const DEFAULT_QUESTIONS: Question[] = [
     id: 'references',
     section: 'tone',
     type: 'list',
-    prompt: 'Any products or brands that capture the feel?',
-    example: 'Headspace onboarding; Linear for density',
+    prompt: 'Any products or brands that capture the feel, and what to borrow from each?',
+    help: 'Name what to take, or the agent copies the whole thing. Format: product — what to borrow.',
+    example: 'Headspace — the calm pacing; Linear — the information density',
   },
   {
     id: 'antiTone',
@@ -272,3 +327,143 @@ export const DEFAULT_QUESTIONS: Question[] = [
 
 /** Known built-in ids, used to separate custom answers into `brief.extra`. */
 export const BUILT_IN_IDS = new Set(DEFAULT_QUESTIONS.map((q) => q.id));
+
+const PROJECT_LABELS: Record<string, string> = {
+  'web-app': 'web app',
+  'marketing-site': 'marketing site',
+  'mobile-app': 'mobile app',
+  dashboard: 'dashboard',
+  components: 'component library',
+  content: 'content piece',
+};
+
+/** Label for a project kind, e.g. "dashboard". */
+export const projectLabel = (kind?: string) => (kind ? (PROJECT_LABELS[kind] ?? kind) : undefined);
+
+/** Question sets by project type. Each is asked only when `kind` matches. */
+function projectSpecifics(): Question[] {
+  const forKind = (kind: string, qs: Array<Omit<Question, 'section' | 'condition'>>): Question[] =>
+    qs.map((q) => ({ ...q, section: 'specifics', condition: { kind } }));
+  return [
+    ...forKind('web-app', [
+      {
+        id: 'keyFlows',
+        type: 'list',
+        prompt: 'What are the key flows, start to finish?',
+        help: 'The agent builds these end to end before anything else.',
+        example: 'Sign up → pick a coach → book a session',
+        quick: true,
+      },
+    ]),
+    ...forKind('marketing-site', [
+      {
+        id: 'conversionGoal',
+        type: 'text',
+        prompt: 'What should a visitor do before they leave?',
+        example: 'Start a free trial',
+        quick: true,
+      },
+      {
+        id: 'trafficSource',
+        type: 'multiselect',
+        prompt: 'Where do visitors come from?',
+        help: 'Search visitors scan; ad visitors expect the ad\'s promise above the fold.',
+        allowOther: true,
+        choices: [
+          { value: 'Search', label: 'Search' },
+          { value: 'Paid ads', label: 'Paid ads' },
+          { value: 'Social', label: 'Social' },
+          { value: 'Email', label: 'Email' },
+          { value: 'Word of mouth', label: 'Word of mouth' },
+          { value: 'Returning visitors', label: 'Returning visitors' },
+        ],
+      },
+      {
+        id: 'proofPoints',
+        type: 'list',
+        prompt: 'What proof can the page use?',
+        help: 'Real numbers, quotes and logos. The agent should never invent these.',
+        example: '4.8 stars from 2,000 reviews; logos of three partner clinics',
+      },
+    ]),
+    ...forKind('mobile-app', [
+      {
+        id: 'offline',
+        type: 'select',
+        prompt: 'Does it need to work offline?',
+        quick: true,
+        choices: [
+          { value: 'full', label: 'Fully offline', hint: 'everything works, syncs later' },
+          { value: 'read', label: 'Read-only offline', hint: 'browse cached content' },
+          { value: 'online', label: 'Online only' },
+        ],
+      },
+      { id: 'oneHanded', type: 'confirm', prompt: 'Is it mostly used one-handed or on the go?' },
+      {
+        id: 'platformStyle',
+        type: 'select',
+        prompt: 'Native look on each platform, or one shared design?',
+        choices: [
+          { value: 'native', label: 'Follow iOS and Android conventions' },
+          { value: 'shared', label: 'One custom design on both' },
+        ],
+      },
+    ]),
+    ...forKind('dashboard', [
+      {
+        id: 'keyMetrics',
+        type: 'list',
+        prompt: 'Which numbers matter most?',
+        help: 'These get the top of the screen; everything else is a drill-down.',
+        example: 'Weekly bookings; no-show rate; revenue by clinic',
+        quick: true,
+      },
+      {
+        id: 'dataDensity',
+        type: 'scale',
+        prompt: 'How dense should it be?',
+        min: 1,
+        max: 5,
+        minLabel: 'Spacious',
+        maxLabel: 'Dense',
+      },
+      {
+        id: 'freshness',
+        type: 'select',
+        prompt: 'How fresh is the data?',
+        choices: [
+          { value: 'realtime', label: 'Real-time' },
+          { value: 'hourly', label: 'Hourly' },
+          { value: 'daily', label: 'Daily' },
+          { value: 'weekly', label: 'Weekly or less' },
+        ],
+      },
+    ]),
+    ...forKind('components', [
+      {
+        id: 'componentScope',
+        type: 'list',
+        prompt: 'Which components are in scope?',
+        example: 'Button, Input, Select, Modal',
+        quick: true,
+      },
+      {
+        id: 'tokensSource',
+        type: 'text',
+        prompt: 'Where do the design tokens live?',
+        example: 'tokens.json, or Figma variables',
+      },
+      { id: 'usageDocs', type: 'confirm', prompt: 'Include usage docs and examples for each component?' },
+    ]),
+    ...forKind('content', [
+      {
+        id: 'format',
+        type: 'text',
+        prompt: 'What format and size?',
+        example: 'Instagram carousel, 1080×1350, 6 slides',
+        quick: true,
+      },
+      { id: 'channel', type: 'text', prompt: 'Where will people see it?', example: 'Instagram and LinkedIn' },
+    ]),
+  ];
+}

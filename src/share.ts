@@ -40,7 +40,7 @@ export function decodeAnswers(token: string): Answers {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Share token has no answers.');
   const out: Answers = {};
   for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
-    if (typeof v === 'string' || typeof v === 'boolean') out[k] = v;
+    if (typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) out[k] = v;
     else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) out[k] = v as string[];
   }
   return out;

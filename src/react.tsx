@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
-import { isEmpty } from './answers.js';
+import { isEmpty, rankItems, scaleRange } from './answers.js';
 import { lintBrief } from './lint.js';
 import { renderBrief, type RenderOptions } from './render.js';
 import { BriefSession } from './session.js';
@@ -194,6 +194,7 @@ export function LowdownForm(props: LowdownFormProps) {
       <QuestionField
         key={q.id}
         question={q}
+        answers={s.answers}
         initial={s.session.draft(q.id) ?? q.default}
         error={error}
         headingRef={headingRef}
@@ -209,6 +210,7 @@ export function LowdownForm(props: LowdownFormProps) {
 
 interface FieldProps {
   question: Question;
+  answers: Answers;
   initial?: AnswerValue;
   error?: string;
   headingRef: RefObject<HTMLHeadingElement>;
@@ -217,18 +219,28 @@ interface FieldProps {
   onSubmit: (value: AnswerValue | undefined) => void;
 }
 
-function QuestionField({ question: q, initial, error, headingRef, canGoBack, onBack, onSubmit }: FieldProps) {
+function QuestionField({ question: q, answers, initial, error, headingRef, canGoBack, onBack, onSubmit }: FieldProps) {
   const id = useId();
-  const [text, setText] = useState(() =>
-    initial === undefined || typeof initial === 'boolean' ? '' : Array.isArray(initial) ? (q.type === 'list' ? initial.join('\n') : '') : initial,
-  );
-  const known = new Set(q.choices?.map((c) => c.value));
-  const [picked, setPicked] = useState<string[]>(() =>
-    initial === undefined || typeof initial === 'boolean' ? [] : (Array.isArray(initial) ? initial : [initial]).filter((v) => known.has(v)),
-  );
-  const [other, setOther] = useState(() =>
-    initial === undefined || typeof initial === 'boolean' ? '' : (Array.isArray(initial) ? initial : [initial]).filter((v) => !known.has(v)).join(', '),
-  );
+  const init: string[] = initial === undefined || typeof initial === 'boolean' ? [] : Array.isArray(initial) ? initial : [String(initial)];
+  const [text, setText] = useState(() => (typeof initial === 'string' ? initial : q.type === 'list' ? init.join('\n') : ''));
+  const { min, max } = scaleRange(q);
+  const scaleValues = q.type === 'scale' ? Array.from({ length: max - min + 1 }, (_, i) => String(min + i)) : [];
+  const known = new Set(q.type === 'scale' ? scaleValues : q.choices?.map((c) => c.value));
+  const [picked, setPicked] = useState<string[]>(() => init.filter((v) => known.has(v)));
+  const [other, setOther] = useState(() => (q.type === 'select' || q.type === 'multiselect' ? init.filter((v) => !known.has(v)).join(', ') : ''));
+  const [order, setOrder] = useState<string[]>(() => {
+    const items = rankItems(q, answers);
+    const given = init.filter((v) => items.includes(v));
+    return [...given, ...items.filter((i) => !given.includes(i))];
+  });
+  const moveItem = (i: number, by: number) =>
+    setOrder((o) => {
+      const j = i + by;
+      if (j < 0 || j >= o.length) return o;
+      const next = [...o];
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      return next;
+    });
 
   const value = (): AnswerValue | undefined => {
     switch (q.type) {
@@ -243,6 +255,10 @@ function QuestionField({ question: q, initial, error, headingRef, canGoBack, onB
         return [...picked, ...other.split(',').map((s) => s.trim()).filter(Boolean)];
       case 'confirm':
         return undefined;
+      case 'scale':
+        return picked[0] === undefined ? undefined : Number(picked[0]);
+      case 'rank':
+        return order;
     }
   };
 
@@ -264,6 +280,38 @@ function QuestionField({ question: q, initial, error, headingRef, canGoBack, onB
       <textarea id={id} className="ld-input ld-textarea" rows={q.type === 'list' ? 4 : 3} value={text} onChange={(e) => setText(e.target.value)}
         placeholder={q.example ? `e.g. ${q.example}` : undefined} aria-describedby={describedBy}
         onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onFormSubmit(e); }} />
+    );
+  } else if (q.type === 'scale') {
+    field = (
+      <div className="ld-scale">
+        <div className="ld-scale-row" role="radiogroup" aria-labelledby={`${id}-q`} aria-describedby={describedBy}>
+          {scaleValues.map((v) => (
+            <button key={v} type="button" role="radio" aria-checked={picked[0] === v} className="ld-scale-step"
+              aria-label={v === String(min) && q.minLabel ? `${v}, ${q.minLabel}` : v === String(max) && q.maxLabel ? `${v}, ${q.maxLabel}` : v}
+              onClick={() => setPicked([v])}>
+              {v}
+            </button>
+          ))}
+        </div>
+        {(q.minLabel || q.maxLabel) && (
+          <div className="ld-scale-ends" aria-hidden="true"><span>{q.minLabel}</span><span>{q.maxLabel}</span></div>
+        )}
+      </div>
+    );
+  } else if (q.type === 'rank') {
+    field = (
+      <ol className="ld-rank" aria-describedby={describedBy}>
+        {order.map((item, i) => (
+          <li key={item} className="ld-rank-item">
+            <span className="ld-rank-n" aria-hidden="true">{i + 1}</span>
+            <span className="ld-rank-label">{item}</span>
+            <span className="ld-rank-moves">
+              <button type="button" className="ld-rank-move" aria-label={`Move “${item}” up`} disabled={i === 0} onClick={() => moveItem(i, -1)}>↑</button>
+              <button type="button" className="ld-rank-move" aria-label={`Move “${item}” down`} disabled={i === order.length - 1} onClick={() => moveItem(i, 1)}>↓</button>
+            </span>
+          </li>
+        ))}
+      </ol>
     );
   } else if (q.type === 'confirm') {
     field = (
@@ -304,6 +352,7 @@ function QuestionField({ question: q, initial, error, headingRef, canGoBack, onB
       </h3>
       {q.help && <p className="ld-help" id={helpId}>{q.help}</p>}
       {q.type === 'list' && <p className="ld-hint">One per line.</p>}
+      {q.type === 'rank' && <p className="ld-hint">Most important first. The top one wins a conflict.</p>}
       {field}
       {error && <p className="ld-error" id={errId} role="alert">{error}</p>}
       {q.type !== 'confirm' && (

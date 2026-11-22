@@ -53,8 +53,8 @@ function TryIt() {
         </div>
         {!shared && (
           <div className="seg" role="group" aria-label="Question set">
-            <button type="button" aria-pressed={quick} onClick={() => setQuick(true)}>Quick · 11</button>
-            <button type="button" aria-pressed={!quick} onClick={() => setQuick(false)}>Full · 17</button>
+            <button type="button" aria-pressed={quick} onClick={() => setQuick(true)}>Quick · ~12</button>
+            <button type="button" aria-pressed={!quick} onClick={() => setQuick(false)}>Full · ~22</button>
           </div>
         )}
       </div>
